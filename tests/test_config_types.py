@@ -1,8 +1,8 @@
 """Типы целей (ls/mail), способы входа (pam/ssh), свой шлюз у цели, запись targets.toml."""
 import pytest
-from monitor.config import tomllib
 
 from monitor import config as cfg
+from monitor.config import tomllib
 
 LS = {'pam_user': 'u', 'password_env': 'A_PW', 'target_host': '192.0.2.10', 'paths': ['/srv']}
 MAIL = {

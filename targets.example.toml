@@ -1,5 +1,6 @@
 # Образец списка целей. Реальный targets.toml в git не попадает.
-# Адреса выдуманные (TEST-NET-1, example.org). Пароли только в .env.
+# Адреса выдуманные (TEST-NET-1, example.org). Пароли только в .env: здесь имя переменной.
+# То же самое можно настроить в интерфейсе: ./monitor-hub tui
 
 [defaults]
 prompt_timeout = 120
@@ -9,12 +10,59 @@ stale_days = 0
 run_timeout = 900         # дольше - предупреждение в беседу
 style = "backups"         # listing | backups | backups-sizes
 
+# 1. Папки на машине через PAM-шлюз (шлюз общий, PAM_HOST в .env).
 [targets.example]
 title = "Example"
 pam_user = "monitor"
-password_env = "EXAMPLE_PAM_PASSWORD"   # имя переменной в .env, не сам пароль
+password_env = "EXAMPLE_PAM_PASSWORD"
 target_host = "192.0.2.10"
 target_sel = 1
 paths = ["/var/example/reports"]
 schedule = "daily 09:00"
 command = "/example"
+
+# 2. Папки на машине напрямую по ssh, без PAM (логин и пароль).
+[targets.direct]
+title = "Direct host"
+via = "ssh"
+user = "monitor"
+password_env = "DIRECT_SSH_PASSWORD"
+target_host = "192.0.2.20"
+ssh_port = 22
+paths = ["/srv/backups"]
+style = "backups-sizes"
+sudo = true
+schedule = "wed 10:00"
+command = "/direct"
+
+# 3. Машина за другим PAM-шлюзом: шлюз задан прямо у цели.
+[targets.other-gateway]
+title = "Second site"
+pam_user = "monitor"
+password_env = "SITE2_PAM_PASSWORD"
+pam_host = "pam2.example.org"
+pam_port = "2222"
+target_host = "192.0.2.30"
+paths = ["/var/reports"]
+command = "/site2"
+
+# 4. Письма о бэкапах в почте (IMAP): проверяем, что за ночь пришли отчёты.
+[targets.mailbox]
+type = "mail"
+title = "Backups by mail"
+password_env = "MAILBOX_PASSWORD"
+imap_host = "mail.example.org"
+imap_user = "backup@example.org"
+mail_from = "noreply@example.org"     # часть адреса отправителя
+folders = ["INBOX"]
+night_from = 18                       # ночь: с 18:00 накануне
+night_to = 12                         # до 12:00 проверяемого дня
+schedule = "daily 09:10"
+command = "/mail"
+
+# Какие машины ждём и когда: дни недели через запятую, daily или sun#1 (первое воскресенье).
+[targets.mailbox.expect]
+app-01 = "mon,tue,wed,thu,fri,sat,sun"
+db-01 = "daily"
+web-01 = "mon"
+files-01 = "sun#1"

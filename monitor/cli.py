@@ -102,7 +102,7 @@ def _describe(target: Target) -> str:
     else:
         host = target.target_host + (' (ssh)' if target.via == 'ssh' else '')
         what = ','.join(target.paths)
-    return f'{target.name:12} {target.title:24} {host:18} {what}  [{when}]  {target.command or "-"}'
+    return f'{target.name:14} {target.title:24} {host:18} {what}  [{when}]  {target.command or "-"}'
 
 
 def cmd_list(args: argparse.Namespace) -> int:

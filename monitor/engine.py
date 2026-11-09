@@ -497,6 +497,11 @@ class Engine:
                     f'[{target.name}] IMAP: {self.mask(str(exc), target)}',
                     'Не удалось получить письма (проверьте настройки почты и пароль)') from exc
         report = mailcheck.build_report(target.title, check_date, expected, results)
+        if self.settings.state_dir:
+            try:
+                runlog.save_report(self.settings.state_dir, target.name, report)
+            except OSError as exc:
+                self.log.warning('не удалось сохранить отчёт %s: %s', target.name, exc)
         good = sum(1 for v in results.values() if v['status'] == 'ok')
         self._note(target, True, f'{good} из {len(expected)} успешно' if expected else 'бэкапов не ждали')
         return report, expected, results

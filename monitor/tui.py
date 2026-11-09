@@ -3,8 +3,9 @@
     ./monitor-hub tui
 
 Слева список целей и параметры выбранной, справа предпросмотр отчёта и журнал.
-Интерфейс правит только targets.toml и .env и проверяет цели вручную; мониторинг
-по расписанию остаётся за демоном.
+Всё настраивается здесь: поля цели (они зависят от типа и способа входа), общие
+настройки (ctrl+e) и команды в строке ">" (/help). Интерфейс правит только
+targets.toml и .env и проверяет цели вручную; мониторинг по расписанию остаётся за демоном.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,16 +23,18 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import DataTable, Input, RichLog, Select, Static
 
 from monitor import app as _app
-from monitor import runlog
+from monitor import mailcheck, runlog, titles
 from monitor.config import (
     Settings,
     Target,
     load_targets,
     parse_targets,
+    path_problem,
     read_defaults,
     save_targets,
     target_to_dict,
@@ -39,6 +43,20 @@ from monitor.config import (
 from monitor.engine import STYLES as REPORT_STYLES
 from monitor.engine import Engine
 from monitor.envfile import set_env_value
+from monitor.formspec import (
+    ENV_FIELDS,
+    FIELD_BY_ID,
+    FIELDS,
+    HELP,
+    blank_values,
+    check_env_value,
+    default_password_env,
+    parse_prompt,
+    raw_from_values,
+    values_from_target,
+    visible,
+)
+from monitor.formspec import apply_set as _apply_set
 
 ACCENT = '#d97757'
 DIM = '#8b8b8b'
@@ -59,35 +77,6 @@ THEME = Theme(
     foreground='#e6e1da',
     dark=True,
 )
-
-STYLE_CHOICES = [
-    ('listing', 'listing'),
-    ('backups', 'backups'),
-    ('backups-sizes', 'backups-sizes'),
-]
-SUDO_CHOICES = [('нет', 'no'), ('да', 'yes')]
-
-# Поля формы: (id, подпись, подсказка)
-FIELDS = [
-    ('name', 'имя', 'латиница: crl, pgbackup'),
-    ('title', 'название', 'как цель называется в беседе'),
-    ('pam_user', 'pam', 'учётка на шлюзе'),
-    ('password', 'пароль', ''),
-    ('target_host', 'вм', 'IP или имя целевой машины'),
-    ('target_sel', 'пункт', 'номер пользователя в меню PAM (обычно 1)'),
-    ('paths', 'папки', '/путь/один, /путь/два'),
-    ('schedule', 'время', 'daily 09:00, wed 10:00'),
-    ('command', 'команда', '/get'),
-    ('peers', 'кому', 'peer_id через запятую (пусто - VK_PEER_ID)'),
-]
-
-
-def split_list(text: str) -> list[str]:
-    return [part.strip() for part in text.replace('\n', ',').split(',') if part.strip()]
-
-
-def default_password_env(name: str) -> str:
-    return f'{name.upper().replace("-", "_")}_PAM_PASSWORD'
 
 
 def latest_screenshot(save_dir: str, name: str) -> Path | None:
@@ -153,9 +142,111 @@ class JournalHandler(logging.Handler):
         self.app.say_threadsafe(message, color)
 
 
+class SettingsScreen(ModalScreen[list]):
+    """Общие настройки из .env: мессенджер, шлюз, токены. Закрывается списком изменённых ключей."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding('ctrl+s', 'save', 'сохранить', priority=True),
+        Binding('escape', 'cancel', 'закрыть', priority=True),
+    ]
+    CSS = f"""
+    SettingsScreen {{ align: center middle; background: #000000 60%; }}
+    #settings-box {{ width: 84; max-width: 96%; height: 90%; border: round {ACCENT}; background: $surface;
+                     padding: 0 1; }}
+    #settings-title {{ height: 1; text-style: bold; color: {ACCENT}; margin-bottom: 1; }}
+    #settings-fields {{ height: 1fr; scrollbar-size-vertical: 1; }}
+    SettingsScreen .row {{ height: 1; }}
+    SettingsScreen .key {{ width: 14; color: {DIM}; background: transparent; }}
+    SettingsScreen Input {{ border: none; height: 1; padding: 0 1; background: $surface-lighten-1; width: 1fr; }}
+    SettingsScreen Input:focus {{ background: $surface-lighten-2; }}
+    SettingsScreen Input > .input--placeholder {{ color: {DIM}; }}
+    SettingsScreen Select {{ width: 26; height: 1; }}
+    SettingsScreen Select > SelectCurrent {{ border: none; height: 1; padding: 0 1;
+                                             background: $surface-lighten-1; }}
+    #settings-problems {{ height: auto; color: {ERR}; }}
+    #settings-hints {{ height: 1; color: {DIM}; }}
+    """
+
+    def __init__(self, env_path: Path) -> None:
+        super().__init__()
+        self.env_path = env_path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id='settings-box'):
+            yield Static(f'общие настройки ({self.env_path.name})', id='settings-title')
+            with VerticalScroll(id='settings-fields'):
+                for field in ENV_FIELDS:
+                    with Horizontal(classes='row'):
+                        yield Static(field.label, classes='key')
+                        if field.choices:
+                            yield Select(list(field.choices), value=self._current_choice(field),
+                                         allow_blank=False, id=f'e-{field.key}')
+                        else:
+                            yield Input(value='' if field.secret else os.environ.get(field.key, ''),
+                                        placeholder=self._placeholder(field), password=field.secret,
+                                        id=f'e-{field.key}')
+            yield Static('', id='settings-problems')
+            yield Static('ctrl+s сохранить   escape закрыть   пустой секрет - не менять', id='settings-hints')
+
+    @staticmethod
+    def _current_choice(field) -> str:
+        value = os.environ.get(field.key, '')
+        if field.key == 'MESSENGER':
+            return value.lower() or 'vk'
+        if field.key == 'SSH_STRICT_HOST_KEY':
+            return value or 'accept-new'
+        if field.key == 'ALLOW_ANY_USER':
+            return '1' if value.lower() in ('1', 'true', 'yes', 'on') else ''
+        return value
+
+    @staticmethod
+    def _placeholder(field) -> str:
+        if field.secret:
+            return 'задан (не показывается)' if os.environ.get(field.key) else 'не задан'
+        return field.hint
+
+    def action_cancel(self) -> None:
+        self.dismiss([])
+
+    def action_save(self) -> None:
+        wanted: dict[str, str] = {}
+        problems: list[str] = []
+        for field in ENV_FIELDS:
+            widget = self.query_one(f'#e-{field.key}')
+            if isinstance(widget, Select):
+                wanted[field.key] = str(widget.value)
+                continue
+            text = widget.value.strip() if isinstance(widget, Input) else ''
+            if field.secret and not text:
+                continue                     # секрет не показываем, пустое поле - не менять
+            error = check_env_value(field, text)
+            if error:
+                problems.append(f'{field.label}: {error}')
+            wanted[field.key] = text
+        box = self.query_one('#settings-problems', Static)
+        if problems:
+            box.update('\n'.join(problems))
+            return
+        changed: list[str] = []
+        try:
+            for key, value in wanted.items():
+                if value == os.environ.get(key, ''):
+                    continue
+                set_env_value(self.env_path, key, value)
+                if value:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
+                changed.append(key)
+        except (OSError, ValueError) as exc:
+            box.update(f'Ошибка записи: {exc}')
+            return
+        self.dismiss(changed)
+
+
 class HubApp(App):
     TITLE = 'monitor-hub'
-    APP_NAME = 'monitor-hub'
+    APP_NAME = titles.APP_NAME
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding('ctrl+r', 'check', 'проверить', priority=True),
         Binding('ctrl+k', 'check_send', 'проверить и отправить', priority=True),
@@ -163,6 +254,7 @@ class HubApp(App):
         Binding('ctrl+s', 'save', 'сохранить', priority=True),
         Binding('ctrl+n', 'new', 'новая', priority=True),
         Binding('ctrl+d', 'delete', 'удалить', priority=True),
+        Binding('ctrl+e', 'settings', 'настройки', priority=True),
         Binding('ctrl+l', 'status', 'статус', priority=True),
         Binding('ctrl+o', 'open_image', 'картинка', priority=True),
         Binding('escape', 'focus_targets', 'цели', show=False),
@@ -183,8 +275,8 @@ class HubApp(App):
     .panel {{ border: round {LINE}; border-title-color: {DIM}; border-title-align: left;
               padding: 0 1; }}
     .panel:focus-within {{ border: round {ACCENT}; border-title-color: {ACCENT}; }}
-    #targets-panel {{ height: auto; max-height: 45%; }}
-    #params-panel {{ height: 1fr; }}
+    #targets-panel {{ height: auto; max-height: 40%; }}
+    #params-panel {{ height: 1fr; scrollbar-size-vertical: 1; }}
     #preview-panel {{ height: 1fr; }}
     #log-panel {{ height: 12; }}
 
@@ -194,20 +286,18 @@ class HubApp(App):
     DataTable:focus > .datatable--cursor {{ background: {ACCENT} 45%; text-style: bold; }}
 
     .row {{ height: 1; }}
-    .key {{ width: 9; color: {DIM}; background: transparent; }}
-    .key-short {{ width: 6; color: {DIM}; margin-left: 2; padding-left: 1; background: transparent; }}
+    .key {{ width: 13; color: {DIM}; background: transparent; }}
     Input {{ border: none; height: 1; padding: 0 1; background: $surface-lighten-1; }}
     Input:focus {{ border: none; background: $surface-lighten-2; }}
     Input > .input--placeholder {{ color: {DIM}; }}
     .row Input {{ width: 1fr; }}
     #prompt Input {{ background: transparent; }}
     #prompt Input:focus {{ background: transparent; }}
-    Select {{ width: 18; height: 1; }}
-    #f-sudo {{ width: 10; }}
+    .row Select {{ width: 30; height: 1; }}
     Select > SelectCurrent {{ border: none; height: 1; padding: 0 1;
                               background: $surface-lighten-1; }}
     Select:focus > SelectCurrent {{ border: none; background: $surface-lighten-2; }}
-    Select > SelectOverlay {{ width: 22; }}
+    Select > SelectOverlay {{ width: 34; }}
 
     #preview-scroll {{ scrollbar-size-vertical: 1; }}
     #log {{ background: transparent; scrollbar-size-vertical: 1; }}
@@ -235,22 +325,21 @@ class HubApp(App):
         yield Static(self._header_text(), id='header')
         with Horizontal(id='prompt'):
             yield Static('>', id='prompt-mark')
-            yield Input(placeholder='имя цели, /run <цель> или /new <имя>', id='prompt-input')
+            yield Input(placeholder='имя цели, /run, /ls <путь>, /set <поле> <значение>, /help', id='prompt-input')
         with Horizontal(id='columns'):
             with Vertical(id='left'):
                 with Vertical(id='targets-panel', classes='panel'):
                     yield DataTable(id='targets', cursor_type='row', zebra_stripes=False)
-                with Vertical(id='params-panel', classes='panel'):
-                    for field_id, label, hint in FIELDS:
-                        with Horizontal(classes='row'):
-                            yield Static(label, id=f'k-{field_id}', classes='key')
-                            yield Input(placeholder=hint, id=f'f-{field_id}',
-                                        password=field_id == 'password')
-                    with Horizontal(classes='row'):
-                        yield Static('стиль', classes='key')
-                        yield Select(STYLE_CHOICES, value='backups', allow_blank=False, id='f-style')
-                        yield Static('sudo', classes='key-short')
-                        yield Select(SUDO_CHOICES, value='no', allow_blank=False, id='f-sudo')
+                with VerticalScroll(id='params-panel', classes='panel'):
+                    for field in FIELDS:
+                        with Horizontal(classes='row', id=f'row-{field.id}'):
+                            yield Static(field.label, id=f'k-{field.id}', classes='key')
+                            if field.widget == 'select':
+                                yield Select(list(field.choices), value=field.choices[0][1],
+                                             allow_blank=False, id=f'f-{field.id}')
+                            else:
+                                yield Input(placeholder=field.hint, id=f'f-{field.id}',
+                                            password=field.widget == 'password')
             with Vertical(id='right'):
                 with Vertical(id='preview-panel', classes='panel'):
                     with VerticalScroll(id='preview-scroll'):
@@ -258,19 +347,19 @@ class HubApp(App):
                                      id='preview')
                 with Vertical(id='log-panel', classes='panel'):
                     yield RichLog(id='log', wrap=True, markup=False, highlight=False)
-        yield Static('ctrl+r проверить   ctrl+k и отправить   ctrl+p пути   ctrl+s сохранить   '
-                     'ctrl+n новая   ctrl+d удалить   ctrl+l статус   ctrl+q выход', id='hints')
+        yield Static('ctrl+r проверить  ctrl+k и отправить  ctrl+p пути  ctrl+s сохранить  ctrl+n новая  '
+                     'ctrl+d удалить  ctrl+e настройки  ctrl+l статус  /help  ctrl+q выход', id='hints')
 
     @staticmethod
     def _header_text() -> Text:
         text = Text()
         text.append('* ', style=f'bold {ACCENT}')
         text.append('monitor-hub', style='bold')
-        text.append('   мониторинг серверов через PAM jump-хост', style=DIM)
+        text.append('   мониторинг серверов и бэкапов: ssh, PAM, почта', style=DIM)
         return text
 
     def on_mount(self) -> None:
-        self._write_terminal('\x1b[22;0t')
+        self._write_terminal(titles.SAVE)
         self.set_window_title()
         self.register_theme(THEME)
         self.theme = 'claude-report'
@@ -285,10 +374,10 @@ class HubApp(App):
         table.focus()
 
     def on_unmount(self) -> None:
-        self._write_terminal('\x1b[23;0t')
+        self._write_terminal(titles.RESTORE)
         logging.getLogger('monitor_hub').removeHandler(self._journal)
 
-    # заголовок окна
+    # заголовок окна (вкладки терминала)
     def _write_terminal(self, data: str) -> None:
         driver = getattr(self, '_driver', None)
         if driver is None:
@@ -300,10 +389,16 @@ class HubApp(App):
             pass
 
     def set_window_title(self, text: str = '') -> None:
-        clean = ''.join(ch for ch in str(text) if ch.isprintable())[:80]
-        title = f'{clean} - {self.APP_NAME}' if clean else self.APP_NAME
-        self._write_terminal(f'\x1b]0;{title}\x07')
+        title = titles.format_title(text)
+        self._write_terminal(titles.osc(title))
         self._window_title = title
+
+    def _idle_title(self) -> None:
+        """Пока ничего не идёт: сколько целей и есть ли среди последних проверок ошибки."""
+        last = runlog.read(self.settings.state_dir) if self.settings.state_dir else {}
+        bad = sum(1 for name in self.targets if name in last and not last[name].get('ok'))
+        text = f'целей: {len(self.targets)}'
+        self.set_window_title(f'[!] {text}, с ошибкой: {bad}' if bad else text)
 
     # журнал
     def say(self, text: str, color: str | None = None, bullet: str = '-') -> None:
@@ -352,11 +447,13 @@ class HubApp(App):
             for problem in self.load_problems:
                 self.say(problem, ERR)
         else:
-            self.say(f'целей: {len(self.targets)} ({_short(self.config_path)})', DIM)
+            self.say(f'целей: {len(self.targets)} ({_short(self.config_path)}), '
+                     f'мессенджер: {self.settings.messenger}', DIM)
             env_problems = validate_environment(self.settings, self.targets, os.environ, need_chat=False)
             for problem in env_problems:
                 self.say(problem, WARN)
         self._fill_table(select)
+        self._idle_title()
 
     def _fill_table(self, select: str | None = None, show: bool = True) -> None:
         table = self.query_one('#targets', DataTable)
@@ -384,73 +481,90 @@ class HubApp(App):
         else:
             mark, result = Text('!', style=ERR), Text('ошибка', style=ERR)
             age = runlog.age_text(time.time() - float(last.get('at', 0)))
-        return mark, target.name, target.title, target.target_host, when, result, age
+        where = target.imap_host if target.type == 'mail' else target.target_host
+        return mark, target.name, target.title, where, when, result, age
 
     # форма
-    def _field(self, name: str) -> Input:
-        return self.query_one(f'#f-{name}', Input)
+    def _widget(self, name: str) -> Input | Select:
+        widget = self.query_one(f'#f-{name}')
+        assert isinstance(widget, (Input, Select))
+        return widget
+
+    def _input(self, name: str) -> Input:
+        widget = self.query_one(f'#f-{name}')
+        assert isinstance(widget, Input)
+        return widget
+
+    def _get(self, name: str) -> str:
+        widget = self._widget(name)
+        return str(widget.value)
+
+    def _set(self, name: str, value: str) -> None:
+        widget = self._widget(name)
+        if isinstance(widget, Select):
+            options = {v for _, v in FIELD_BY_ID[name].choices}
+            widget.value = value if value in options else FIELD_BY_ID[name].choices[0][1]
+        else:
+            widget.value = value
+
+    def _kind(self) -> str:
+        return self._get('type') or 'ls'
+
+    def _via(self) -> str:
+        return self._get('via') or 'pam'
+
+    def _apply_visibility(self) -> None:
+        kind, via = self._kind(), self._via()
+        for field in FIELDS:
+            self.query_one(f'#row-{field.id}').display = visible(field, kind, via)
+        label = 'пароль почты' if kind == 'mail' else 'пароль ssh' if via == 'ssh' else 'пароль PAM'
+        self._mark_password(self.targets.get(self.current or ''), label)
+
+    def _fill_form(self, values: dict[str, str]) -> None:
+        for field in FIELDS:
+            if field.id == 'password':
+                continue
+            self._set(field.id, values.get(field.id, ''))
+        self._input('password').value = ''
+        self._apply_visibility()
+
+    def _values(self) -> dict[str, str]:
+        return {field.id: self._get(field.id) for field in FIELDS}
 
     def _show_target(self, name: str) -> None:
         target = self.targets[name]
         self.current = name
-        values = {
-            'name': target.name, 'title': target.title, 'pam_user': target.pam_user,
-            'target_host': target.target_host, 'target_sel': target.target_sel,
-            'paths': ', '.join(target.paths), 'schedule': ', '.join(str(s) for s in target.schedule),
-            'command': target.command, 'peers': ', '.join(target.peers),
-        }
-        for key, value in values.items():
-            self._field(key).value = value
-        self._field('password').clear()
-        self._field('name').disabled = True
-        self._field('password').placeholder = f'не менять ({target.password_env} в .env)'
-        self.query_one('#f-style', Select).value = target.style
-        self.query_one('#f-sudo', Select).value = 'yes' if target.sudo else 'no'
-        self._mark_password(target)
+        self._fill_form(values_from_target(target))
+        self._input('name').disabled = True
+        self._input('password').placeholder = f'не менять ({target.password_env} в .env)'
         self.query_one('#params-panel').border_title = f'параметры: {name}'
         self._show_preview(target)
         self._delete_armed = None
 
-    def _mark_password(self, target: Target | None) -> None:
+    def _mark_password(self, target: Target | None, label: str = 'пароль') -> None:
         key = self.query_one('#k-password', Static)
         if target is None:
-            key.update(Text('пароль', style=DIM))
+            key.update(Text(label, style=DIM))
         elif os.environ.get(target.password_env):
-            key.update(Text('пароль +', style=OK))
+            key.update(Text(f'{label} +', style=OK))
         else:
-            key.update(Text('пароль !', style=ERR))
+            key.update(Text(f'{label} !', style=ERR))
 
     def form_target(self) -> tuple[Target | None, list[str], str]:
         """Цель из формы. Возвращает (цель, проблемы, введённый пароль)."""
-        name = self._field('name').value.strip()
+        values = self._values()
+        name = self._get('name').strip()
         if not name:
             return None, ['укажите имя цели (латиница, цифры, - и _)'], ''
+        kind, via = self._kind(), self._via()
         existing = self.targets.get(self.current or '')
-        raw: dict[str, object] = {
-            'title': self._field('title').value.strip() or name,
-            'pam_user': self._field('pam_user').value.strip(),
-            'password_env': existing.password_env if existing else default_password_env(name or 'x'),
-            'target_host': self._field('target_host').value.strip(),
-            'target_sel': self._field('target_sel').value.strip() or '1',
-            'paths': split_list(self._field('paths').value),
-            'schedule': split_list(self._field('schedule').value),
-            'style': str(self.query_one('#f-style', Select).value),
-            'sudo': self.query_one('#f-sudo', Select).value == 'yes',
-            'peers': split_list(self._field('peers').value),
-        }
-        command = self._field('command').value.strip()
-        if command:
-            raw['command'] = command
-        if existing:
-            keep = target_to_dict(existing, self.defaults)
-            for key in ('stale_days', 'prompt_timeout', 'connect_retries', 'connect_retry_delay', 'run_timeout'):
-                if key in keep:
-                    raw[key] = keep[key]
+        password_env = existing.password_env if existing else default_password_env(name, kind, via)
+        raw, problems = raw_from_values(values, kind=kind, via=via, password_env=password_env)
         others = {n: target_to_dict(t, self.defaults) for n, t in self.targets.items() if n != self.current}
         if not self.current and name in others:
             return None, [f'цель {name} уже есть'], ''
-        parsed, problems = parse_targets({'defaults': self.defaults, 'targets': {**others, name: raw}})
-        return parsed.get(name), problems, self._field('password').value
+        parsed, more = parse_targets({'defaults': self.defaults, 'targets': {**others, name: raw}})
+        return parsed.get(name), problems + more, self._get('password')
 
     # события
     @on(DataTable.RowHighlighted, '#targets')
@@ -459,52 +573,129 @@ class HubApp(App):
         if name in self.targets and name != self.current:
             self._show_target(name)
 
+    @on(Select.Changed, '#f-type')
+    @on(Select.Changed, '#f-via')
+    def _kind_changed(self, event: Select.Changed) -> None:
+        self._apply_visibility()
+
     @on(Input.Submitted, '#prompt-input')
     def _prompt(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ''
-        if not text:
+        command = parse_prompt(text)
+        if command is None:
             return
-        parts = text.split()
-        if parts[0] == '/new':
-            self.action_new()
-            if len(parts) > 1:
-                self._field('name').value = parts[1]
+        handler = getattr(self, f'_cmd_{command.name}', None) if text.startswith('/') else None
+        if handler is not None:
+            handler(command)
             return
-        if parts[0] == '/run' and len(parts) == 2:
-            name = parts[1]
-        else:
-            name = parts[0].lstrip('/')
-            by_command = {t.command: n for n, t in self.targets.items() if t.command}
-            name = by_command.get(parts[0], name)
+        by_command = {t.command: n for n, t in self.targets.items() if t.command}
+        head = text.split()[0]
+        name = by_command.get(head, head.lstrip('/'))
         if name not in self.targets:
-            self.headline(f'Нет такой цели: {name}', ERR)
+            self.headline(f'Нет такой цели или команды: {head}. /help - список команд', ERR)
             return
         self._select(name)
-        if parts[0] == '/run' or parts[0] in {t.command for t in self.targets.values()}:
-            self.action_check()
+        if head in by_command:
+            self.action_check(arg=' '.join(text.split()[1:]))
 
     def _select(self, name: str) -> None:
         table = self.query_one('#targets', DataTable)
         table.move_cursor(row=list(self.targets).index(name))
         self._show_target(name)
 
+    # команды строки ">"
+    def _target_and_rest(self, args: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+        """Первое слово - имя цели? Тогда выбираем её. Иначе работаем с выбранной."""
+        if args and args[0] in self.targets:
+            self._select(args[0])
+            return args[0], args[1:]
+        return self.current, args
+
+    def _cmd_new(self, command) -> None:
+        name = next((a for a in command.args if a not in ('mail', 'ls')), '')
+        self.action_new('mail' if 'mail' in command.args else 'ls', name)
+
+    def _cmd_run(self, command) -> None:
+        _, rest = self._target_and_rest(command.args)
+        self.action_check(arg=' '.join(rest))
+
+    def _cmd_send(self, command) -> None:
+        _, rest = self._target_and_rest(command.args)
+        self.action_check(send=True, arg=' '.join(rest))
+
+    def _cmd_paths(self, command) -> None:
+        self._target_and_rest(command.args)
+        self.action_check_paths()
+
+    def _cmd_ls(self, command) -> None:
+        _, rest = self._target_and_rest(command.args)
+        send = bool(rest) and rest[-1].lower() in ('send', 'отправить')
+        words = rest[:-1] if send else rest
+        if not words:
+            self.headline('Укажите папку: /ls /путь/к/папке  (в конце send - отправить картинку)', WARN)
+            return
+        self.action_ls(' '.join(words), send)
+
+    def _cmd_set(self, command) -> None:
+        field_id, _, value = command.rest.partition(' ')
+        if not field_id:
+            self.headline('Вид: /set <поле> <значение>, например /set command /pg', WARN)
+            return
+        values = self._values()
+        error = _apply_set(values, field_id, value, kind=self._kind(), via=self._via())
+        if error:
+            self.headline(error, ERR)
+            return
+        for key in ('type', 'via'):
+            if key == field_id:
+                self._set(key, values[key])
+        self._apply_visibility()
+        if field_id not in ('type', 'via'):
+            self._set(field_id, values[field_id])
+        self.say(f'{field_id} = {values[field_id]}  (не забудьте /save)', DIM)
+
+    def _cmd_save(self, command) -> None:
+        self.action_save()
+
+    def _cmd_delete(self, command) -> None:
+        self.action_delete()
+
+    def _cmd_settings(self, command) -> None:
+        self.action_settings()
+
+    def _cmd_status(self, command) -> None:
+        self.action_status()
+
+    def _cmd_open(self, command) -> None:
+        self.action_open_image()
+
+    def _cmd_help(self, command) -> None:
+        self.headline('Команды строки ">"', ACCENT)
+        for usage, text in HELP:
+            self.say(f'{usage:<28} {text}', DIM, bullet=' ')
+
     # действия
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Пока открыто окно настроек, горячие клавиши главного экрана не работают
+        (иначе ctrl+s сохранил бы цель вместо настроек)."""
+        if isinstance(self.screen, SettingsScreen) and action != 'quit':
+            return False
+        return True
+
     def action_focus_targets(self) -> None:
         self.query_one('#targets', DataTable).focus()
 
-    def action_new(self) -> None:
+    def action_new(self, kind: str = 'ls', name: str = '') -> None:
         self.current = None
-        for field_id, _, _ in FIELDS:
-            self._field(field_id).value = ''
-        self._field('name').disabled = False
-        self._field('password').placeholder = 'пароль PAM (сохранится только в .env)'
-        self.query_one('#f-style', Select).value = 'backups'
-        self.query_one('#f-sudo', Select).value = 'no'
-        self._mark_password(None)
+        self._fill_form(blank_values(kind))
+        self._set('name', name)
+        self._input('name').disabled = False
+        self._input('password').placeholder = 'сохранится только в .env'
+        self._apply_visibility()
         self.query_one('#params-panel').border_title = 'параметры: новая цель'
         self.query_one('#preview', Static).update(Text('Новая цель: заполните поля и нажмите ctrl+s.', style=DIM))
-        self._field('name').focus()
+        self._input('name').focus()
 
     def action_save(self) -> None:
         if self.load_problems:
@@ -517,7 +708,7 @@ class HubApp(App):
                 self.say(problem, ERR)
             return
         if not self.current and not password and not os.environ.get(target.password_env):
-            self.headline('Не сохранено: введите пароль PAM', ERR)
+            self.headline(f'Не сохранено: введите пароль ({self._password_label()})', ERR)
             return
         targets = dict(self.targets)
         targets[target.name] = target
@@ -529,7 +720,7 @@ class HubApp(App):
         except (OSError, ValueError) as exc:
             self.headline(f'Ошибка записи: {exc}', ERR)
             return
-        self._field('password').value = ''
+        self._input('password').value = ''
         self.headline(f'Сохранено: {target.name}', OK)
         if backup:
             self.say(f'прошлая версия: {backup.name}', DIM)
@@ -538,6 +729,9 @@ class HubApp(App):
         self.say('демон подхватит изменения после: ./monitor-hub restart', DIM)
         self.current = target.name
         self.reload_targets(select=target.name)
+
+    def _password_label(self) -> str:
+        return 'почты' if self._kind() == 'mail' else 'ssh' if self._via() == 'ssh' else 'PAM'
 
     def action_delete(self) -> None:
         name = self.current
@@ -563,6 +757,19 @@ class HubApp(App):
         self.headline(f'Удалено: {name} (прошлая версия: {self.config_path.name}.bak)', OK)
         self.reload_targets()
 
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen(self.env_path or self.root / '.env'), self._settings_closed)
+
+    def _settings_closed(self, changed: list | None) -> None:
+        if not changed:
+            return
+        self.settings = Settings.from_env()
+        self.headline('Настройки сохранены: ' + ', '.join(changed), OK)
+        for problem in validate_environment(self.settings, self.targets, os.environ, need_chat=True):
+            self.say(problem, WARN)
+        self.say('демон подхватит изменения после: ./monitor-hub restart', DIM)
+        self._idle_title()
+
     def _target_for_run(self) -> tuple[Target | None, str]:
         target, problems, password = self.form_target()
         if target is None or problems:
@@ -572,38 +779,53 @@ class HubApp(App):
             return None, ''
         return target, password
 
-    def action_check(self, send: bool = False) -> None:
-        target, password = self._target_for_run()
-        if target is None:
-            return
-        extra = {target.password_env: password} if password else {}
-        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_chat=send)
+    def _env_ready(self, target: Target, extra: dict[str, str], need_chat: bool) -> bool:
+        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra},
+                                    need_chat=need_chat)
         if need:
             self.headline('Не хватает настроек', ERR)
             for problem in need:
                 self.say(problem, ERR)
+        return not need
+
+    def action_check(self, send: bool = False, arg: str = '') -> None:
+        target, password = self._target_for_run()
+        if target is None:
+            return
+        extra = {target.password_env: password} if password else {}
+        if not self._env_ready(target, extra, send):
             return
         self.headline(f'Проверяю {target.name}{" и отправляю" if send else ""}...', ACCENT)
         self.set_window_title(f'[..] проверяю: {target.name}')
-        self._check_worker(target, extra, send)
+        self._check_worker(target, extra, send, arg)
 
     def action_check_send(self) -> None:
         self.action_check(send=True)
 
     @work(thread=True, exclusive=True, group='net')
-    def _check_worker(self, target: Target, extra: dict[str, str], send: bool) -> None:
+    def _check_worker(self, target: Target, extra: dict[str, str], send: bool, arg: str = '') -> None:
         engine = self._make_engine(extra)
         try:
-            saved = engine.check(target, send=send)
+            if target.type == 'mail':
+                text = engine.check_mail(target, send=send, check_date=mailcheck.parse_date_arg(arg))
+            else:
+                saved = engine.check(target, send=send)
         except Exception as exc:
             self.call_from_thread(self._check_failed, target, engine.mask(engine.user_facing(exc), target))
             return
-        self.call_from_thread(self._check_done, target, saved, engine.last_report, send)
+        if target.type == 'mail':
+            self.call_from_thread(self._mail_done, target, text, send)
+        else:
+            self.call_from_thread(self._check_done, target, saved, engine.last_report, send)
 
     def _check_failed(self, target: Target, message: str) -> None:
         self.set_window_title(f'[!] ошибка: {target.name}')
         self.headline(f'Ошибка: {message}', ERR)
         self._fill_table(select=self.current or target.name, show=False)
+
+    def _sent_text(self, send: bool) -> str:
+        label = {'vk': 'ВКонтакте', 'telegram': 'Telegram'}.get(self.settings.messenger, 'беседу')
+        return f'Готово, отправлено: {label}' if send else 'Готово (ничего не отправлялось)'
 
     def _check_done(self, target: Target, saved: list[str], report, send: bool) -> None:
         self.set_window_title(f'[ok] готово: {target.name}')
@@ -613,19 +835,65 @@ class HubApp(App):
             self.query_one('#preview-panel').border_title = f'предпросмотр: {target.name}, только что'
         for path in saved:
             self.say(f'картинка: {_short(path)}', DIM)
-        self.headline('Готово, отправлено в беседу' if send else 'Готово (в беседу не отправлялось)', OK)
+        self.headline(self._sent_text(send), OK)
         self._fill_table(select=self.current or target.name, show=False)
+
+    def _mail_done(self, target: Target, text: str, send: bool) -> None:
+        self.set_window_title(f'[ok] готово: {target.name}')
+        self.query_one('#preview', Static).update(_report_text(text))
+        self.query_one('#preview-panel').border_title = f'предпросмотр: {target.name}, только что'
+        self.headline(self._sent_text(send), OK)
+        self._fill_table(select=self.current or target.name, show=False)
+
+    # папка сразу
+    def action_ls(self, path: str, send: bool = False) -> None:
+        if self._kind() != 'ls':
+            self.headline('/ls работает для целей типа ls (папки по ssh)', ERR)
+            return
+        target, password = self._target_for_run()
+        if target is None:
+            return
+        problem = path_problem(path)
+        if problem:
+            self.headline(f'Путь {path!r} не подходит: {problem}', ERR)
+            return
+        extra = {target.password_env: password} if password else {}
+        if not self._env_ready(target, extra, send):
+            return
+        self.headline(f'Смотрю {path} на {target.name}...', ACCENT)
+        self.set_window_title(f'[..] ls {path}')
+        self._ls_worker(target, path, extra, send)
+
+    @work(thread=True, exclusive=True, group='net')
+    def _ls_worker(self, target: Target, path: str, extra: dict[str, str], send: bool) -> None:
+        engine = self._make_engine(extra)
+        one = replace(target, paths=(path,))
+        try:
+            report = engine.build_report(one, engine.fetch_listings(one, (path,)))
+            if send:
+                saved = engine.save_screenshots(one, report.buffers)
+                engine.chat.send_photos(saved, report.caption(), engine.peers_for(one)[0])
+        except Exception as exc:
+            self.call_from_thread(self._check_failed, target, engine.mask(engine.user_facing(exc), target))
+            return
+        self.call_from_thread(self._ls_done, target, path, report, send)
+
+    def _ls_done(self, target: Target, path: str, report, send: bool) -> None:
+        self.set_window_title(f'[ok] ls {path}')
+        self.query_one('#preview', Static).update(
+            listing_preview(report.listings, target.style, self._preview_width()))
+        self.query_one('#preview-panel').border_title = f'предпросмотр: {target.name} {path}'
+        self.headline(self._sent_text(send) if send else f'Готово: {path}', OK)
 
     def action_check_paths(self) -> None:
         target, password = self._target_for_run()
         if target is None:
             return
+        if target.type != 'ls':
+            self.headline('Проверка папок работает для целей типа ls', ERR)
+            return
         extra = {target.password_env: password} if password else {}
-        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_chat=False)
-        if need:
-            self.headline('Не хватает настроек', ERR)
-            for problem in need:
-                self.say(problem, ERR)
+        if not self._env_ready(target, extra, False):
             return
         self.headline(f'Проверяю пути {target.name}...', ACCENT)
         self.set_window_title(f'[..] пути: {target.name}')
@@ -686,6 +954,16 @@ class HubApp(App):
     def _show_preview(self, target: Target) -> None:
         preview = self.query_one('#preview', Static)
         panel = self.query_one('#preview-panel')
+        if target.type == 'mail':
+            saved_report = runlog.read_report(self.settings.state_dir, target.name) if self.settings.state_dir else None
+            if saved_report is None:
+                panel.border_title = 'предпросмотр'
+                preview.update(Text('Отчётов ещё нет: ctrl+r - проверить сейчас.', style=DIM))
+            else:
+                at, text = saved_report
+                panel.border_title = f'предпросмотр: {target.name}, {runlog.age_text(time.time() - at)} назад'
+                preview.update(_report_text(text))
+            return
         saved = runlog.read_listing(self.settings.state_dir, target.name) if self.settings.state_dir else None
         if saved is not None:
             style, at, listings = saved
@@ -703,6 +981,16 @@ class HubApp(App):
             preview.update(image_preview(path, self._preview_width()))
         except Exception as exc:
             preview.update(Text(f'Не удаётся показать {path.name}: {exc}', style=WARN))
+
+
+def _report_text(text: str) -> Text:
+    """Текстовый отчёт mail: [ok] зелёным, [!] красным, [?] жёлтым."""
+    out = Text()
+    for line in text.split('\n'):
+        style = OK if line.startswith('[ok]') else ERR if line.startswith('[!]') else \
+            WARN if line.startswith('[?]') else ''
+        out.append(line + '\n', style=style)
+    return out
 
 
 def _short(path: str | Path) -> str:

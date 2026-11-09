@@ -9,48 +9,8 @@ from textual.widgets import DataTable, Input, RichLog, Select
 
 from monitor import engine, runlog, tui
 from monitor.config import tomllib
-
-TOML = '''
-[targets.crl]
-title = "CRL"
-pam_user = "monitor"
-password_env = "CRL_PW"
-target_host = "192.0.2.10"
-paths = ["/var/crl"]
-style = "listing"
-schedule = "daily 09:00"
-command = "/get"
-
-[targets.pg]
-title = "Postgres"
-pam_user = "monitor"
-password_env = "PG_PW"
-target_host = "192.0.2.30"
-paths = ["/mnt/a", "/mnt/b"]
-sudo = true
-command = "/pg"
-'''
-
-LINES = [
-    '-rw-r--r-- 1 root root 2085 Nov  9 06:54 issuing-ca.crl',
-    '-rwxr-xr-x 1 root root 3505 Oct 10 10:12 update.sh',
-    'drwxr-xr-x 2 root root 4096 Oct  1 02:00 archive',
-]
-
-
-@pytest.fixture
-def project(tmp_path, monkeypatch):
-    (tmp_path / 'targets.toml').write_text(TOML, encoding='utf-8')
-    (tmp_path / '.env').write_text('CRL_PW=secret\n', encoding='utf-8')
-    for key in ('CRL_PW', 'PG_PW', 'NEW_PAM_PASSWORD', 'VK_TOKEN', 'VK_PEER_ID'):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv('STATE_DIR', str(tmp_path / 'state'))
-    monkeypatch.setenv('SAVE_DIR', str(tmp_path / 'shots'))
-    monkeypatch.setenv('PAM_HOST', 'pam.example.org')
-    monkeypatch.setenv('HOME', str(tmp_path))
-    monkeypatch.setenv('NO_OPEN_SCREENSHOT', '1')
-    monkeypatch.setattr(engine.Engine, 'fetch_listings', lambda self, t: dict.fromkeys(t.paths, LINES))
-    return tmp_path
+from monitor.formspec import split_list
+from tests.tui_common import LINES  # noqa: F401
 
 
 def make_app(project):
@@ -98,7 +58,7 @@ def test_check_shows_listing_and_sets_title(project):
             await pilot.press('ctrl+r')
             await settle(pilot, app)
             assert app._window_title.startswith('[ok] готово: crl')
-            assert 'Готово (в беседу не отправлялось)' in log_text(app)
+            assert 'Готово (ничего не отправлялось)' in log_text(app)
             preview = str(app.query_one('#preview').render())
             assert 'issuing-ca.crl' in preview and '*update.sh' in preview
             assert runlog.read(project / 'state')['crl']['ok']
@@ -274,7 +234,7 @@ def test_prompt_selects_and_runs(project):
             assert app.current == 'crl' and app._window_title.startswith('[ok]')
             prompt.value = 'nope'
             await pilot.press('enter')
-            assert 'Нет такой цели: nope' in log_text(app)
+            assert 'Нет такой цели или команды: nope' in log_text(app)
             prompt.value = '/new extra'
             await pilot.press('enter')
             assert app.current is None and app.query_one('#f-name', Input).value == 'extra'
@@ -341,5 +301,5 @@ def test_image_preview_and_helpers(tmp_path):
     Image.new('RGB', (100, 50), (19, 72, 140)).save(path)
     text = tui.image_preview(path, width=20)
     assert text.plain.count('\n') == 5 and set(text.plain) <= {' ', '\n'}
-    assert tui.split_list('/a, /b\n/c,,') == ['/a', '/b', '/c']
+    assert split_list('/a, /b\n/c,,') == ['/a', '/b', '/c']
     assert tui.default_password_env('pg-main') == 'PG_MAIN_PAM_PASSWORD'

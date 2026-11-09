@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_common import LINES as TUI_LINES
+from tests.tui_common import TOML as TUI_TOML
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -108,3 +111,21 @@ def clock(monkeypatch):
     import time
     ticks = itertools.count(0, 0.5)
     monkeypatch.setattr(time, 'monotonic', lambda: next(ticks))
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch):
+    (tmp_path / 'targets.toml').write_text(TUI_TOML, encoding='utf-8')
+    (tmp_path / '.env').write_text('CRL_PW=secret\n', encoding='utf-8')
+    for key in ('CRL_PW', 'PG_PW', 'NEW_PAM_PASSWORD', 'VK_TOKEN', 'VK_PEER_ID', 'MESSENGER', 'TELEGRAM_TOKEN',
+                'TELEGRAM_CHAT_ID', 'ALLOWED_USERS', 'ALLOW_ANY_USER'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('SAVE_DIR', str(tmp_path / 'shots'))
+    monkeypatch.setenv('PAM_HOST', 'pam.example.org')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('NO_OPEN_SCREENSHOT', '1')
+    from monitor import engine
+    monkeypatch.setattr(engine.Engine, 'fetch_listings',
+                        lambda self, t, paths=None: dict.fromkeys(paths or t.paths, TUI_LINES))
+    return tmp_path

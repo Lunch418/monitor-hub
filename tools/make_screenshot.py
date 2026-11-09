@@ -65,7 +65,7 @@ async def main(out_svg: str) -> None:
     from monitor import engine, runlog, tui
     runlog.record(tmp / 'state', 'backup', True, 'картинок: 1')
     runlog.record(tmp / 'state', 'pgbackup', False, 'Не удалось пройти этап на jump-хосте')
-    engine.Engine.fetch_listings = lambda self, target: dict.fromkeys(target.paths, LISTING)
+    engine.Engine.fetch_listings = lambda self, target, paths=None: dict.fromkeys(paths or target.paths, LISTING)
 
     app = tui.HubApp(tmp / 'targets.toml', tmp, env_path=tmp / '.env')
     async with app.run_test(size=(160, 44)) as pilot:

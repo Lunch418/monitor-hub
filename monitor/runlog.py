@@ -82,3 +82,21 @@ def read_listing(state_dir: str | Path, name: str):
         return data['style'], float(data['at']), listings
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def save_report(state_dir: str | Path, name: str, text: str) -> None:
+    """Последний текстовый отчёт цели (у mail) для предпросмотра."""
+    folder = Path(state_dir) / 'reports'
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f'.{name}.tmp'
+    tmp.write_text(text, encoding='utf-8')
+    os.replace(tmp, folder / f'{name}.txt')
+
+
+def read_report(state_dir: str | Path, name: str) -> tuple[float, str] | None:
+    """(время, текст) или None."""
+    path = Path(state_dir) / 'reports' / f'{name}.txt'
+    try:
+        return path.stat().st_mtime, path.read_text(encoding='utf-8')
+    except OSError:
+        return None

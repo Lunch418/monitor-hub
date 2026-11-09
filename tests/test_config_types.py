@@ -1,6 +1,6 @@
 """Типы целей (ls/mail), способы входа (pam/ssh), свой шлюз у цели, запись targets.toml."""
 import pytest
-import tomllib
+from monitor.config import tomllib
 
 from monitor import config as cfg
 

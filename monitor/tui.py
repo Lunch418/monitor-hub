@@ -353,7 +353,7 @@ class HubApp(App):
                 self.say(problem, ERR)
         else:
             self.say(f'целей: {len(self.targets)} ({_short(self.config_path)})', DIM)
-            env_problems = validate_environment(self.settings, self.targets, os.environ, need_vk=False)
+            env_problems = validate_environment(self.settings, self.targets, os.environ, need_chat=False)
             for problem in env_problems:
                 self.say(problem, WARN)
         self._fill_table(select)
@@ -577,7 +577,7 @@ class HubApp(App):
         if target is None:
             return
         extra = {target.password_env: password} if password else {}
-        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_vk=send)
+        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_chat=send)
         if need:
             self.headline('Не хватает настроек', ERR)
             for problem in need:
@@ -621,7 +621,7 @@ class HubApp(App):
         if target is None:
             return
         extra = {target.password_env: password} if password else {}
-        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_vk=False)
+        need = validate_environment(self.settings, {target.name: target}, {**os.environ, **extra}, need_chat=False)
         if need:
             self.headline('Не хватает настроек', ERR)
             for problem in need:

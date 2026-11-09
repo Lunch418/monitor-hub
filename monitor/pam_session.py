@@ -1,8 +1,9 @@
 """
-pam_session.py - вход на целевую машину через PAM jump-хост (ssh + pexpect).
+pam_session.py - вход на целевую машину через PAM jump-хост или напрямую (ssh + pexpect).
 
-Сценарий: пароль PAM -> меню -> IP цели -> выбор пользователя -> приглашение
-shell. Команды выполняет вызывающий внутри `with session.login(px) as sh:`.
+Сценарий через PAM: пароль -> меню -> IP цели -> выбор пользователя -> приглашение
+shell. Напрямую (direct): пароль ssh -> приглашение shell.
+Команды выполняет вызывающий внутри `with session.login(px) as sh:`.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ class PamConfig:
     connect_retry_delay: int
     # Строка для лога в начале сессии; три %s: хост, порт, проверка ключа хоста.
     connect_message: str = 'SSH -> PAM %s:%s (проверка ключа хоста: %s)'
+    # True: вход прямо на машину (host/port/user - уже сама машина), без меню PAM.
+    direct: bool = False
 
 
 PROMPT_PATTERNS = [b'\\$ ', b'# ', b'> ', b'% ', b'] ', b'~\\$', b'~#']
@@ -61,6 +64,12 @@ def ssh_argv(cfg: PamConfig) -> list[str]:
         except OSError:
             pass
     prefix = '' if cfg.strict_algs else '+'
+    algorithms: list[str] = []
+    if cfg.kex:
+        algorithms += ['-o', f'KexAlgorithms={prefix}{cfg.kex}']
+    if cfg.hostkey_algs:
+        algorithms += ['-o', f'HostKeyAlgorithms={prefix}{cfg.hostkey_algs}',
+                       '-o', f'PubkeyAcceptedAlgorithms=+{cfg.hostkey_algs}']
     return [
         'ssh', '-tt',
         '-p', str(cfg.port),
@@ -72,9 +81,7 @@ def ssh_argv(cfg: PamConfig) -> list[str]:
         '-o', 'ServerAliveInterval=30',
         '-o', 'ServerAliveCountMax=4',
         '-o', 'ConnectTimeout=20',
-        '-o', f'KexAlgorithms={prefix}{cfg.kex}',
-        '-o', f'HostKeyAlgorithms={prefix}{cfg.hostkey_algs}',
-        '-o', f'PubkeyAcceptedAlgorithms=+{cfg.hostkey_algs}',
+        *algorithms,
         '-o', 'PubkeyAuthentication=no',
         '-o', 'NumberOfPasswordPrompts=1',
         f'{cfg.user}@{cfg.host}',
@@ -118,7 +125,7 @@ class PamShell:
             ctx = self.mask_secrets(repr((self.child.before or b'')[-400:]))
             raise self.error_cls(
                 f'{stage}: {reason} | {ctx}',
-                f'Не удалось пройти этап "{stage}" на jump-хосте',
+                f'Не удалось пройти этап "{stage}" {"на машине" if self.cfg.direct else "на jump-хосте"}',
                 retryable=retryable,
             )
         return idx
@@ -166,13 +173,23 @@ class PamSession:
         except px.ExceptionPexpect as exc:
             raise self.error_cls(
                 f'не удалось запустить ssh: {exc}',
-                'Не удалось подключиться к jump-хосту',
+                'Не удалось подключиться к машине' if cfg.direct else 'Не удалось подключиться к jump-хосту',
                 retryable=True,
             ) from exc
         child.setwinsize(50, 220)
 
         sh = PamShell(child, px, cfg, log, self.error_cls, self.mask_secrets)
         try:
+            if cfg.direct:
+                sh.expect_any([b'[Pp]assword:'], 'ssh password', timeout=25)
+                sh.send_line(cfg.password)
+                log.info('ssh: пароль отправлен')
+                sh.wait_prompt()
+                log.info('Shell получен на %s', cfg.host)
+                self._drain(child)
+                yield sh
+                return
+
             sh.expect_any([b'[Pp]assword:'], 'PAM password', timeout=25)
             sh.send_line(cfg.password)
             log.info('PAM: авторизация отправлена')
@@ -189,15 +206,19 @@ class PamSession:
             sh.wait_prompt()
             log.info('Shell получен на %s', cfg.target_host)
 
-            time.sleep(0.3)
-            try:
-                child.read_nonblocking(4096, timeout=1)
-            except Exception:
-                pass
-
+            self._drain(child)
             yield sh
         finally:
             close_child(child)
+
+    @staticmethod
+    def _drain(child) -> None:
+        """Выбрасывает остаток приветствия, чтобы он не попал в вывод первой команды."""
+        time.sleep(0.3)
+        try:
+            child.read_nonblocking(4096, timeout=1)
+        except Exception:
+            pass
 
     def fetch(self, once: Callable, *, validate_config: Callable[[], list[str]],
               config_error_cls):

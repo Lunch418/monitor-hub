@@ -127,3 +127,38 @@ def test_check_paths_with_sudo_target_accepts_sudo(server_factory, tmp_path):
     server = server_factory(states={'/srv/pg': 'sudo'})
     engine, target = make(server.port, tmp_path, sudo=True, paths=('/srv/pg',))
     assert engine.check_paths(target)[0].ok
+
+
+def test_direct_ssh_without_menu(server_factory, tmp_path):
+    server = server_factory(direct=True)
+    engine, _ = make(server.port, tmp_path)
+    target = Target(name='gw', title='GW', via='ssh', user=USER, password_env='GW_PW',
+                    target_host='127.0.0.1', ssh_port=server.port, paths=('/srv/crl',),
+                    prompt_timeout=30, connect_retries=1, connect_retry_delay=0)
+    listings = engine.fetch_listings(target)
+    assert any('issuing-ca.crl' in line for line in listings['/srv/crl'])
+    assert not any(e[0] == 'target' for e in server.events)         # меню PAM не было
+    assert engine.check_paths(target)[0].ok
+
+
+def test_direct_ssh_wrong_password_is_clean_error(server_factory, tmp_path):
+    server = server_factory(direct=True)
+    engine, _ = make(server.port, tmp_path)
+    engine.env['GW_PW'] = 'wrong'
+    target = Target(name='gw', title='GW', via='ssh', user=USER, password_env='GW_PW',
+                    target_host='127.0.0.1', ssh_port=server.port, paths=('/srv/crl',),
+                    prompt_timeout=30, connect_retries=1, connect_retry_delay=0)
+    with pytest.raises(eng.HubError) as exc:
+        engine.fetch_listings(target)
+    assert 'wrong' not in str(exc.value) and 'на машине' in engine.user_facing(exc.value)
+
+
+def test_target_uses_its_own_gateway(server_factory, tmp_path):
+    server = server_factory()
+    engine, target = make(1, tmp_path, pam_host='127.0.0.1', pam_port=str(server.port))
+    listings = engine.fetch_listings(target)          # общий PAM_PORT=1 никуда не ведёт
+    assert '/srv/crl' in listings
+    assert engine.gateway(target) is engine.gateway(target)
+    other = Target(name='o', title='O', pam_user=USER, password_env='GW_PW', target_host='h',
+                   paths=('/s',), pam_host='127.0.0.2', pam_port='2200')
+    assert engine.gateway(other) is not engine.gateway(target)

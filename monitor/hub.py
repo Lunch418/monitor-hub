@@ -2,7 +2,7 @@
 hub.py - демон monitor-hub: расписание всех целей, команды из беседы, изоляция целей.
 
 Каждая проверка идёт в своём потоке. Одна и та же цель не запускается дважды
-одновременно (лок цели), входы на шлюз ограничены (Engine.limiter), а сторож
+одновременно (лок цели), входы на шлюз ограничены (Engine.gateway), а сторож
 сообщает в беседу, если проверка не уложилась в run_timeout. Зависшая или
 упавшая цель не мешает остальным.
 """
@@ -13,8 +13,6 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 
-from monitor import daemon as _md
-from monitor.common import is_fatal_vk_error
 from monitor.config import Settings, Target
 from monitor.engine import Engine
 from monitor.router import Router
@@ -41,7 +39,7 @@ class Hub:
         lock = self.locks[target.name]
         if not lock.acquire(blocking=False):
             if peer_id:
-                self.engine.vk.send_message(peer_id, f'Подождите, {target.title} уже проверяется...')
+                self.engine.chat.send_message(peer_id, f'Подождите, {target.title} уже проверяется...')
             else:
                 self.log.warning('[%s] плановая проверка пропущена: предыдущая ещё идёт', target.name)
             return None
@@ -62,7 +60,7 @@ class Hub:
     def _too_long(self, target: Target, peer_id: int | None) -> None:
         self.log.error('[%s] проверка идёт дольше %d с', target.name, target.run_timeout)
         peer = peer_id or self.engine.peers_for(target)[0]
-        self.engine.vk.send_message(
+        self.engine.chat.send_message(
             peer, f'Проверка "{target.title}" идёт дольше {target.run_timeout // 60} мин. '
                   'Результат придёт, когда она завершится.')
 
@@ -77,16 +75,16 @@ class Hub:
             return
         if action.kind == 'deny':
             self.log.warning('Отказ: команда %r от %s (peer %s)', text.strip()[:40], from_id, peer_id)
-            self.engine.vk.send_message(peer_id, action.text)
+            self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'reply':
-            self.engine.vk.send_message(peer_id, action.text)
+            self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'run' and action.target is not None:
             self.log.info('[%s] команда от %s (peer %s)', action.target.name, from_id, peer_id)
             if self.run_target(action.target, peer_id) is not None:
-                self.engine.vk.send_message(peer_id, f'Проверяю: {action.target.title}...')
+                self.engine.chat.send_message(peer_id, f'Проверяю: {action.target.title}...')
 
     def poll(self) -> None:
-        """Цикл long poll (в отдельном потоке)."""
+        """Приём команд из беседы (в отдельном потоке)."""
         if not (self.settings.allowed_users or self.settings.allow_any_user):
             self.log.warning('ALLOWED_USERS не задан - команды из беседы отключены '
                              '(или ALLOW_ANY_USER=1, чтобы разрешить всем)')
@@ -95,12 +93,10 @@ class Hub:
         def startup() -> None:
             who = 'все' if self.settings.allow_any_user else ', '.join(sorted(self.settings.allowed_users))
             commands = [*sorted(self.router.by_command), '/targets', '/run', '/help']
-            self.log.info('VK long poll запущен. Команды: %s. Пользователи: %s', ' '.join(commands), who)
+            self.log.info('%s: приём команд запущен. Команды: %s. Пользователи: %s',
+                          self.engine.chat.label, ' '.join(commands), who)
 
-        _md.poll_messages(
-            log=self.log, vk=self.engine.vk, group_id=self.settings.vk_group_id,
-            on_message=self.on_message, label='команд', is_fatal_vk_error=is_fatal_vk_error,
-            startup=startup)
+        self.engine.chat.poll(self.on_message, startup)
 
     # главный цикл
     def describe_schedule(self) -> list[str]:

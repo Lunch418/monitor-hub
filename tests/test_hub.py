@@ -28,7 +28,7 @@ def make_hub(tmp_path):
         settings = Settings(vk_peer_id=100, save_dir=str(tmp_path), allowed_users=frozenset({'7'}), **settings)
         targets = targets or {'crl': target(), 'pg': target('pg', '/pg')}
         engine = eng.Engine(settings, {}, logging.getLogger('hub-test'), targets)
-        engine.vk = FakeVk()
+        engine.chat = FakeVk()
         engine.run = runner or (lambda t, peer_id=None: None)
         hub = Hub(engine, targets, settings, logging.getLogger('hub-test'))
         hub.spawned = []
@@ -51,15 +51,15 @@ def test_command_from_chat_runs_target_and_acks(make_hub):
     for thread in hub.spawned:
         thread.join(timeout=2)
     assert calls == [('crl', 55)]
-    assert hub.engine.vk.messages == [(55, 'Проверяю: CRL...')]
+    assert hub.engine.chat.messages == [(55, 'Проверяю: CRL...')]
 
 
 def test_denied_and_reply(make_hub):
     hub = make_hub()
     hub.on_message(55, '8', '/get')
     hub.on_message(55, '7', '/targets')
-    assert hub.engine.vk.messages[0] == (55, 'Доступ запрещён')
-    assert '/get - CRL' in hub.engine.vk.messages[1][1]
+    assert hub.engine.chat.messages[0] == (55, 'Доступ запрещён')
+    assert '/get - CRL' in hub.engine.chat.messages[1][1]
 
 
 def test_same_target_is_not_run_twice_at_once(make_hub):
@@ -73,7 +73,7 @@ def test_same_target_is_not_run_twice_at_once(make_hub):
     first = hub.run_target(hub.targets['crl'], 55)
     started.wait(2)
     assert hub.run_target(hub.targets['crl'], 56) is None
-    assert hub.engine.vk.messages == [(56, 'Подождите, CRL уже проверяется...')]
+    assert hub.engine.chat.messages == [(56, 'Подождите, CRL уже проверяется...')]
     assert hub.run_target(hub.targets['crl']) is None            # плановый: только в лог
     other = hub.run_target(hub.targets['pg'], 57)                # другая цель не ждёт
     assert other is not None
@@ -112,14 +112,14 @@ def test_watchdog_reports_slow_check(make_hub):
     try:
         thread = hub.run_target(targets['crl'])
         for _ in range(100):
-            if hub.engine.vk.messages:
+            if hub.engine.chat.messages:
                 break
             release.wait(0.02)
     finally:
         threading.Timer = original
         release.set()
         thread.join(2)
-    peer, text = hub.engine.vk.messages[0]
+    peer, text = hub.engine.chat.messages[0]
     assert peer == 100 and 'дольше 1 мин' in text
 
 

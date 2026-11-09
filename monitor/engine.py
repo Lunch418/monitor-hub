@@ -13,16 +13,17 @@ import shlex
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
 
 from monitor import app as _app
-from monitor import common as _mc
 from monitor import ls_report as _ls
 from monitor import pam_session as _pam
 from monitor import runlog
 from monitor.config import Settings, Target
+from monitor.messengers import make_messenger
 
 
 class HubError(_app.MonitorError):
@@ -247,12 +248,8 @@ class Engine:
         # и в сообщениях, не привязанных к одной цели.
         self.password_names = tuple(t.password_env for t in (targets or {}).values())
         self.log = log
-        self.vk = _mc.VkClient(
-            token=settings.vk_token, attach_delay=settings.attach_delay, log=log,
-            error_cls=HubError, config_error_cls=ConfigError,
-            send_failed_message='Не удалось отправить отчёт. Попробуйте позже.',
-        )
-        self.limiter = GatewayLimiter(settings.max_parallel, settings.login_gap)
+        self.chat = make_messenger(settings, log, error_cls=HubError, config_error_cls=ConfigError)
+        self._limiters: dict[tuple[str, str], GatewayLimiter] = {}
         self._renderers: dict[str, _ls.McRenderer] = {}
         self.last_report: Report | None = None
         self._lock = threading.Lock()
@@ -262,7 +259,7 @@ class Engine:
         return self.env.get(target.password_env, '')
 
     def mask(self, text: str, target: Target | None = None) -> str:
-        secrets = [self.settings.vk_token]
+        secrets = self.chat.secrets()
         if target is not None:
             secrets.append(self.password(target))
         else:
@@ -275,17 +272,40 @@ class Engine:
     # вход и листинги
     def pam_session(self, target: Target) -> _pam.PamSession:
         s = self.settings
-        cfg = _pam.PamConfig(
-            host=s.pam_host, port=s.pam_port, user=target.pam_user, password=self.password(target),
-            target_host=target.target_host, target_sel=target.target_sel,
-            strict_host_key=s.strict_host_key, known_hosts=s.known_hosts,
-            kex=s.kex, hostkey_algs=s.hostkey_algs, strict_algs=s.strict_algs,
-            prompt_timeout=target.prompt_timeout, prompt_nudge=s.prompt_nudge,
-            connect_retries=target.connect_retries, connect_retry_delay=target.connect_retry_delay,
-            connect_message=f'[{target.name}] SSH -> PAM %s:%s (проверка ключа хоста: %s)',
-        )
+        if target.via == 'ssh':
+            cfg = _pam.PamConfig(
+                host=target.target_host, port=target.ssh_port, user=target.user,
+                password=self.password(target), target_host=target.target_host, target_sel='',
+                strict_host_key=s.strict_host_key, known_hosts=s.known_hosts,
+                kex='', hostkey_algs='', strict_algs=s.strict_algs,
+                prompt_timeout=target.prompt_timeout, prompt_nudge=s.prompt_nudge,
+                connect_retries=target.connect_retries, connect_retry_delay=target.connect_retry_delay,
+                connect_message=f'[{target.name}] SSH -> %s:%s (проверка ключа хоста: %s)', direct=True,
+            )
+        else:
+            cfg = _pam.PamConfig(
+                host=target.pam_host or s.pam_host, port=target.pam_port or s.pam_port,
+                user=target.pam_user, password=self.password(target),
+                target_host=target.target_host, target_sel=target.target_sel,
+                strict_host_key=s.strict_host_key, known_hosts=s.known_hosts,
+                kex=s.kex, hostkey_algs=s.hostkey_algs, strict_algs=s.strict_algs,
+                prompt_timeout=target.prompt_timeout, prompt_nudge=s.prompt_nudge,
+                connect_retries=target.connect_retries, connect_retry_delay=target.connect_retry_delay,
+                connect_message=f'[{target.name}] SSH -> PAM %s:%s (проверка ключа хоста: %s)',
+            )
         return _pam.PamSession(cfg, log=self.log, error_cls=HubError,
                                mask_secrets=lambda text: self.mask(text, target))
+
+    def gateway(self, target: Target):
+        """Ограничитель входов для шлюза цели. Прямой ssh не ограничивается: это разные машины."""
+        if target.via == 'ssh':
+            return nullcontext()
+        s = self.settings
+        key = (target.pam_host or s.pam_host, str(target.pam_port or s.pam_port))
+        with self._lock:
+            if key not in self._limiters:
+                self._limiters[key] = GatewayLimiter(s.max_parallel, s.login_gap)
+            return self._limiters[key]
 
     def fetch_listings(self, target: Target) -> dict[str, list[str]]:
         """{путь: строки листинга}. Один вход на все пути; при срыве соединения
@@ -310,11 +330,11 @@ class Engine:
                         raw, self.log, path=path, mask=lambda text: self.mask(text, target))
             return results
 
-        with self.limiter:
+        with self.gateway(target):
             return session.fetch(
                 once,
                 validate_config=lambda: validate_environment(
-                    self.settings, {target.name: target}, self.env, need_vk=False),
+                    self.settings, {target.name: target}, self.env, need_chat=False),
                 config_error_cls=ConfigError,
             )
 
@@ -334,11 +354,11 @@ class Engine:
                     out.append(parse_verdict(path, sh.child.before or b'', target.sudo))
             return out
 
-        with self.limiter:
+        with self.gateway(target):
             return session.fetch(
                 once,
                 validate_config=lambda: validate_environment(
-                    self.settings, {target.name: target}, self.env, need_vk=False),
+                    self.settings, {target.name: target}, self.env, need_chat=False),
                 config_error_cls=ConfigError,
             )
 
@@ -446,7 +466,7 @@ class Engine:
 
     def peers_for(self, target: Target) -> tuple[int, list[str]]:
         """(основной получатель, дополнительные) для плановой отправки."""
-        default = int(target.peers[0]) if target.peers else self.settings.vk_peer_id
+        default = int(target.peers[0]) if target.peers else self.settings.default_peer
         extras = [*target.peers[1:], *self.settings.extra_peers]
         return default, extras
 
@@ -460,7 +480,7 @@ class Engine:
             _ls.open_screenshot(saved[0])
         if send:
             default, _ = self.peers_for(target)
-            self.vk.send_photos(saved, make_caption(), peer_id or default)
+            self.chat.send_photos(saved, make_caption(), peer_id or default)
         else:
             self.log.info('[%s] подпись: %s (отправка отключена)', target.name, make_caption())
         return saved
@@ -476,7 +496,7 @@ class Engine:
             collect=lambda: self.collect(target),
             save_screenshots=lambda buffers: self.save_screenshots(target, buffers),
             open_screenshot=_ls.open_screenshot,
-            send_photos=self.vk.send_photos, send_message=self.vk.send_message,
+            send_photos=self.chat.send_photos, send_message=self.chat.send_message,
             user_facing=self.user_facing,
             mask_secrets=lambda text: self.mask(text, target), extra_peers=extras,
         )

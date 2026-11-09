@@ -37,7 +37,7 @@ def _print_problems(problems: Sequence[str]) -> None:
         print(f'  - {problem}', file=sys.stderr)
 
 
-def _load(args: argparse.Namespace, *, need_ssh: bool, need_vk: bool):
+def _load(args: argparse.Namespace, *, need_ssh: bool, need_chat: bool):
     """(settings, targets, env_path) или None, если конфигурация неверна."""
     env_path = _app.load_env(str(ROOT))
     config = args.config or os.environ.get('TARGETS_FILE') or str(ROOT / 'targets.toml')
@@ -45,7 +45,7 @@ def _load(args: argparse.Namespace, *, need_ssh: bool, need_vk: bool):
     settings = Settings.from_env()
     if targets:
         problems.extend(validate_environment(
-            settings, targets, os.environ, need_ssh=need_ssh, need_vk=need_vk))
+            settings, targets, os.environ, need_ssh=need_ssh, need_chat=need_chat))
     if problems:
         _print_problems(problems)
         print(f'Цели: {config}', file=sys.stderr)
@@ -84,7 +84,7 @@ def _hub(settings: Settings, targets):
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=True, need_vk=not args.no_vk)
+    loaded = _load(args, need_ssh=True, need_chat=not args.no_chat)
     if loaded is None:
         return 1
     _, targets, _ = loaded
@@ -99,7 +99,7 @@ def _describe(target: Target) -> str:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=False, need_vk=False)
+    loaded = _load(args, need_ssh=False, need_chat=False)
     if loaded is None:
         return 1
     for target in loaded[1].values():
@@ -108,7 +108,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=True, need_vk=not args.no_send)
+    loaded = _load(args, need_ssh=True, need_chat=not args.no_send)
     if loaded is None:
         return 1
     settings, targets, _ = loaded
@@ -131,7 +131,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_check_paths(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=True, need_vk=False)
+    loaded = _load(args, need_ssh=True, need_chat=False)
     if loaded is None:
         return 1
     settings, targets, _ = loaded
@@ -162,7 +162,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=True, need_vk=True)
+    loaded = _load(args, need_ssh=True, need_chat=True)
     if loaded is None:
         return 2
     settings, targets, _ = loaded
@@ -175,7 +175,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    loaded = _load(args, need_ssh=True, need_vk=True)
+    loaded = _load(args, need_ssh=True, need_chat=True)
     if loaded is None:
         return 2
     settings, targets, _ = loaded
@@ -253,7 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest='command', required=True)
 
     p = sub.add_parser('validate', help='проверить конфигурацию без сети')
-    p.add_argument('--no-vk', action='store_true', help='не требовать настроек ВК')
+    p.add_argument('--no-chat', '--no-vk', dest='no_chat', action='store_true',
+                   help='не требовать настроек мессенджера')
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser('list', help='показать цели')

@@ -103,7 +103,7 @@ def test_peers_for(engine):
 def test_check_no_send_saves_and_never_touches_vk(engine, monkeypatch):
     target = make_target()
     monkeypatch.setattr(engine, 'fetch_listings', lambda t: {'/p': LINES})
-    monkeypatch.setattr(engine.vk, 'send_photos', lambda *a, **k: pytest.fail('sent'))
+    monkeypatch.setattr(engine.chat, 'send_photos', lambda *a, **k: pytest.fail('sent'))
     saved = engine.check(target, send=False)
     assert len(saved) == 1 and saved[0].endswith('.png')
 
@@ -111,7 +111,7 @@ def test_check_no_send_saves_and_never_touches_vk(engine, monkeypatch):
 def test_check_sends_to_default_peer(engine, monkeypatch):
     sent = []
     monkeypatch.setattr(engine, 'fetch_listings', lambda t: {'/p': LINES})
-    monkeypatch.setattr(engine.vk, 'send_photos', lambda paths, caption, peer: sent.append((paths, peer)))
+    monkeypatch.setattr(engine.chat, 'send_photos', lambda paths, caption, peer: sent.append((paths, peer)))
     engine.check(make_target(peers=('9',)), send=True)
     assert sent[0][1] == 9
 
@@ -123,7 +123,7 @@ def test_run_reports_error_to_chat_without_raising(engine, monkeypatch):
         raise eng.HubError('detail pw-secret-value', 'Не получилось')
 
     monkeypatch.setattr(engine, 'collect', boom)
-    monkeypatch.setattr(engine.vk, 'send_message', lambda peer, text: messages.append((peer, text)))
+    monkeypatch.setattr(engine.chat, 'send_message', lambda peer, text: messages.append((peer, text)))
     engine.run(make_target(title='Моя цель'), peer_id=42)
     assert messages == [(42, 'Ошибка мониторинга (Моя цель): Не получилось')]
 
@@ -131,6 +131,6 @@ def test_run_reports_error_to_chat_without_raising(engine, monkeypatch):
 def test_run_scheduled_goes_to_default_and_extras(engine, monkeypatch, no_sleep):
     sent = []
     monkeypatch.setattr(engine, 'fetch_listings', lambda t: {'/p': LINES})
-    monkeypatch.setattr(engine.vk, 'send_photos', lambda paths, caption, peer: sent.append(peer))
+    monkeypatch.setattr(engine.chat, 'send_photos', lambda paths, caption, peer: sent.append(peer))
     engine.run(make_target(peers=('5', '6')))
     assert sent == [5, 6]

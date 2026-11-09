@@ -129,14 +129,15 @@ def _serve_connection(sock, user, password, mode, conn_number, events, listings=
         if mode.get('drop_first') and conn_number == 1:
             chan.close()
             return
-        chan.send(b'Welcome to the gateway\r\nselect one:\r\n')
-        target = _readline(chan)
-        events.append(('target', target))
-        chan.send(b'Type one of the users: 1\r\n')
-        selection = _readline(chan)
-        events.append(('selection', selection))
-        chan.send(b'Connecting to device "target"\r\n')
-        time.sleep(0.2)
+        if not mode.get('direct'):       # direct: сразу машина, без меню шлюза
+            chan.send(b'Welcome to the gateway\r\nselect one:\r\n')
+            target = _readline(chan)
+            events.append(('target', target))
+            chan.send(b'Type one of the users: 1\r\n')
+            selection = _readline(chan)
+            events.append(('selection', selection))
+            chan.send(b'Connecting to device "target"\r\n')
+            time.sleep(0.2)
         prompt = b'user@target:~$ '
         if mode.get('prompt_needs_enter'):
             events.append(('waiting_enter', None))

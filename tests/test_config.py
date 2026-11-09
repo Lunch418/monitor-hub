@@ -131,7 +131,7 @@ def test_validate_environment(monkeypatch):
     ok = cfg.Settings(pam_host='pam.example.org', vk_token='t', vk_peer_id=1)
     env = {'CRL_PAM_PASSWORD': 'a', 'PG_PAM_PASSWORD': 'b'}
     assert cfg.validate_environment(ok, targets, env) == []
-    assert cfg.validate_environment(cfg.Settings(), targets, {}, need_ssh=False, need_vk=False) == []
+    assert cfg.validate_environment(cfg.Settings(), targets, {}, need_ssh=False, need_chat=False) == []
 
 
 def test_settings_from_env(monkeypatch, tmp_path):

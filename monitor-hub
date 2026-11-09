@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+import sys
+
+from monitor.cli import main
+
+sys.exit(main())

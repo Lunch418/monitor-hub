@@ -1,0 +1,42 @@
+# Настройки инструментов проекта. Зависимости - в requirements*.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+# поддельный шлюз крутится в потоках, а pexpect форкает: предупреждение ожидаемо
+filterwarnings = ["ignore:This process .* is multi-threaded:DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["monitor"]
+branch = false
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["venv", ".venv"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "B", "UP", "C4", "RUF"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",   # кириллица в строках, докстрингах и комментариях - норма
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "C408", "RUF005", "RUF012", "B017"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+files = ["monitor"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv"]
+# B110: осознанное "молчаливое" подавление ошибок в best-effort местах (закрытие сессии и т.п.)
+# B311: random используется для random_id сообщений ВК, не для безопасности
+# B404/B603: subprocess с фиксированным списком аргументов для запуска просмотрщика картинок
+skips = ["B110", "B311", "B404", "B603"]

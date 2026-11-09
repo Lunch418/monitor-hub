@@ -1,0 +1,33 @@
+# Служба systemd для monitor-hub. Ставится скриптом:
+#
+#   sudo bash deploy/install.sh 2>&1 | tee /tmp/monitor-hub-install.log
+#
+# Скрипт сам подставит каталог установки и пользователя. Вручную: заменить
+# /opt/monitor-hub и User, затем
+#   sudo cp deploy/monitor-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now monitor-hub
+
+[Unit]
+Description=monitor-hub: мониторинг серверов через PAM jump-хост
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monitor
+WorkingDirectory=/opt/monitor-hub
+ExecStart=/opt/monitor-hub/venv/bin/python /opt/monitor-hub/monitor-hub run
+Restart=always
+RestartSec=30
+Environment=NO_OPEN_SCREENSHOT=1
+StandardOutput=journal
+StandardError=journal
+
+# Монитору не нужны привилегии и общий /tmp
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

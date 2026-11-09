@@ -1,0 +1,20 @@
+# Образец списка целей. Реальный targets.toml в git не попадает.
+# Адреса выдуманные (TEST-NET-1, example.org). Пароли только в .env.
+
+[defaults]
+prompt_timeout = 120
+connect_retries = 2
+connect_retry_delay = 60
+stale_days = 0
+run_timeout = 900         # дольше - предупреждение в беседу
+style = "backups"         # listing | backups | backups-sizes
+
+[targets.example]
+title = "Example"
+pam_user = "monitor"
+password_env = "EXAMPLE_PAM_PASSWORD"   # имя переменной в .env, не сам пароль
+target_host = "192.0.2.10"
+target_sel = 1
+paths = ["/var/example/reports"]
+schedule = "daily 09:00"
+command = "/example"

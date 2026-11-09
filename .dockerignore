@@ -1,0 +1,15 @@
+# секреты и локальные данные в образ не попадают
+.env
+targets.toml
+
+
+*.bundle
+# мусор
+.git
+.github
+venv
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache

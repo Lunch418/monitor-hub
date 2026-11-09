@@ -1,0 +1,483 @@
+"""
+engine.py - проверка одной цели: вход через PAM, `ls -la` по всем путям в одном
+сеансе, разбор, картинки в стиле Midnight Commander, отправка в ВК.
+
+Различия между целями (формат размеров, цвета, сортировка, подпись, sudo,
+число путей) задаются полями Target, а не отдельными скриптами.
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from io import BytesIO
+
+from monitor import app as _app
+from monitor import common as _mc
+from monitor import ls_report as _ls
+from monitor import pam_session as _pam
+from monitor import runlog
+from monitor.config import Settings, Target
+
+
+class HubError(_app.MonitorError):
+    """Ошибка проверки (см. MonitorError: подробности для лога, коротко для чата)."""
+
+
+class ConfigError(HubError):
+    pass
+
+
+# Стили отчёта
+
+@dataclass(frozen=True)
+class Style:
+    size_display: Callable[[int, bool], str]
+    mark_exec: bool            # '*' к имени исполняемого файла прямо в name
+    sort: Callable[[list[dict]], list[dict]]
+    noun: str                  # слово в подписи: "Файлов: 12"
+    count_files_only: bool     # считать только файлы (без папок)
+    bold_fallback: bool        # жирный шрифт не найден -> обычный, а не растровый
+    row_style: _ls.RowStyle
+    header_marker: str         # значок сортировки в шапке колонки Name
+
+
+_C_WHITE = (210, 232, 255)
+_C_FILE = (255, 95, 210)
+_C_STALE = (255, 60, 90)
+_C_DATE_OLD = (170, 205, 232)
+
+_L_WHITE = (200, 228, 255)
+_L_STALE = (255, 120, 120)
+_L_DATE_OLD = (160, 200, 230)
+
+
+def _listing_row_style(entry: dict, is_stale: bool):
+    if is_stale:
+        return entry['name'], _L_STALE, _L_STALE
+    if entry['is_exec']:
+        return entry['name'], _ls.C_GREEN, _ls.C_GREEN
+    return entry['name'], _L_WHITE, _L_DATE_OLD
+
+
+def _backups_row_style(entry: dict, is_stale: bool):
+    if entry['is_dir']:
+        return '/' + entry['name'], _C_WHITE, _C_DATE_OLD
+    if entry['is_exec']:
+        return '*' + entry['name'], _ls.C_GREEN, _ls.C_GREEN
+    if is_stale:
+        return entry['name'], _C_STALE, _C_STALE
+    return entry['name'], _C_FILE, _C_FILE
+
+
+def _sort_listing(entries: list[dict]) -> list[dict]:
+    """Каталоги первыми, затем по имени без учёта регистра (как в Midnight Commander)."""
+    return sorted(entries, key=lambda e: (not e['is_dir'], e['raw_name'].lower()))
+
+
+def _sort_backups(entries: list[dict]) -> list[dict]:
+    """Папки первыми по алфавиту, файлы по убыванию имени (свежие даты обычно в начале)."""
+    return _ls.sort_dirs_then_files_desc(entries)[0]
+
+
+STYLES: dict[str, Style] = {
+    # Файлы и каталоги как есть: сертификаты, отчёты.
+    'listing': Style(
+        size_display=_ls.size_display_listing, mark_exec=True, sort=_sort_listing,
+        noun='Файлов', count_files_only=False, bold_fallback=False,
+        row_style=_listing_row_style, header_marker='.n'),
+    # Бэкапы: каталоги отмечены DIR.
+    'backups': Style(
+        size_display=_ls.size_display_backups, mark_exec=False, sort=_sort_backups,
+        noun='Бэкапов', count_files_only=True, bold_fallback=True,
+        row_style=_backups_row_style, header_marker="'n"),
+    # Бэкапы, у каталогов виден настоящий размер в байтах.
+    'backups-sizes': Style(
+        size_display=_ls.size_display_backups_sizes, mark_exec=False, sort=_sort_backups,
+        noun='Бэкапов', count_files_only=True, bold_fallback=True,
+        row_style=_backups_row_style, header_marker='.n'),
+}
+
+
+# Команда ls
+
+def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
+    """(маркер_начала, маркер_конца, команда) для одного пути.
+
+    Маркеры собираются на удалённой стороне (printf), поэтому в самой набранной
+    команде их нет: ожидание не зависит от того, отэхоит ли терминал команду, и
+    эхо не принимается за вывод.
+
+    Путь экранируется shlex.quote. sudo: `sudo -n` никогда не спрашивает пароль
+    (сразу 'a password is required'), `env LANG=C` вместо `sudo LANG=C`, потому
+    что sudo с env_reset отказывается проставлять переменные; sudo применяется
+    ровно к одному `ls -la`."""
+    begin = f'__HUB{idx}_BEG__'
+    end = f'__HUB{idx}_END__'
+    quoted = shlex.quote(path)
+    listing = f'sudo -n env LANG=C LC_ALL=C ls -la {quoted}' if sudo else f'LANG=C ls -la {quoted}'
+    command = (
+        f"printf '__HUB%s__\\n' {idx}_BEG; "
+        f'{listing}; '
+        f"printf '__HUB%s__\\n' {idx}_END"
+    )
+    return begin, end, command
+
+
+# Проверка путей
+
+VERDICTS = {
+    'ok': 'ok',
+    'noent': 'нет такого пути',
+    'notdir': 'не папка',
+    'denied': 'нет прав',
+    'sudo': 'нужен sudo',
+}
+
+
+@dataclass(frozen=True)
+class PathVerdict:
+    path: str
+    code: str            # ключ VERDICTS
+    entries: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 'ok'
+
+    def __str__(self) -> str:
+        text = VERDICTS.get(self.code, self.code)
+        if self.entries is not None:
+            text += f', записей: {self.entries}'
+        return text
+
+
+def probe_command(idx: int, path: str) -> tuple[str, str]:
+    """(маркер конца, команда), которая печатает вердикт для пути.
+
+    Как и у ls_command, все маркеры собираются на удалённой стороне, поэтому
+    эхо команды не путается с ответом. sudo только `-n` и только для `test`/`ls`."""
+    q = shlex.quote(path)
+    say = "printf '__HUB%s__ %s\\n'"
+    command = (
+        f'if [ ! -e {q} ]; then {say} V_noent 0; '
+        f'elif [ ! -d {q} ]; then {say} V_notdir 0; '
+        f'elif [ -r {q} ] && [ -x {q} ]; then {say} V_ok "$(ls -A {q} | wc -l)"; '
+        f'elif sudo -n test -r {q} 2>/dev/null; then {say} V_sudo "$(sudo -n ls -A {q} | wc -l)"; '
+        f'else {say} V_denied 0; fi; '
+        f"printf '__HUB%s__\\n' {idx}_PEND"
+    )
+    return f'__HUB{idx}_PEND__', command
+
+
+_VERDICT_RE = re.compile(rb'__HUBV_([a-z]+)__ *(\d*)')
+
+
+def parse_verdict(path: str, raw: bytes, sudo_allowed: bool) -> PathVerdict:
+    match = _VERDICT_RE.search(raw)
+    if not match:
+        return PathVerdict(path, 'denied')
+    code = match.group(1).decode()
+    count = int(match.group(2)) if match.group(2) else None
+    if code == 'sudo' and sudo_allowed:
+        code = 'ok'                  # у цели sudo = true: читать через sudo и нужно
+    if code not in ('ok', 'sudo'):
+        count = None
+    return PathVerdict(path, code, count)
+
+
+# Ограничитель входов на шлюз
+
+class GatewayLimiter:
+    """Не больше max_parallel одновременных входов и пауза gap секунд между их началами.
+
+    Шлюз старый и не любит всплески: когда несколько целей по расписанию стартуют в
+    одну минуту, входы идут по очереди, а не одновременно."""
+
+    def __init__(self, max_parallel: int, gap: float, *, sleep=time.sleep,
+                 monotonic=time.monotonic) -> None:
+        self._sem = threading.BoundedSemaphore(max(1, max_parallel))
+        self._gap = max(0.0, gap)
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._last: float | None = None
+
+    def __enter__(self) -> GatewayLimiter:
+        self._sem.acquire()
+        try:
+            with self._lock:
+                if self._last is not None:
+                    wait = self._gap - (self._monotonic() - self._last)
+                    if wait > 0:
+                        self._sleep(wait)
+                self._last = self._monotonic()
+        except BaseException:
+            self._sem.release()
+            raise
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._sem.release()
+
+
+# Движок
+
+@dataclass
+class Report:
+    buffers: list[BytesIO]
+    caption: Callable[[], str]
+    # (путь, записи, имена устаревших) - для текстового предпросмотра в интерфейсе
+    listings: list[tuple[str, list[dict], set[str]]] = field(default_factory=list)
+
+
+class Engine:
+    """Общий для всех целей контекст: настройки, логгер, сессия ВК, шрифты."""
+
+    def __init__(self, settings: Settings, env: Mapping[str, str], log,
+                 targets: Mapping[str, Target] | None = None) -> None:
+        self.settings = settings
+        self.env = env
+        # Имена переменных с паролями всех целей: нужны, чтобы замаскировать пароль
+        # и в сообщениях, не привязанных к одной цели.
+        self.password_names = tuple(t.password_env for t in (targets or {}).values())
+        self.log = log
+        self.vk = _mc.VkClient(
+            token=settings.vk_token, attach_delay=settings.attach_delay, log=log,
+            error_cls=HubError, config_error_cls=ConfigError,
+            send_failed_message='Не удалось отправить отчёт. Попробуйте позже.',
+        )
+        self.limiter = GatewayLimiter(settings.max_parallel, settings.login_gap)
+        self._renderers: dict[str, _ls.McRenderer] = {}
+        self.last_report: Report | None = None
+        self._lock = threading.Lock()
+
+    # секреты и сообщения
+    def password(self, target: Target) -> str:
+        return self.env.get(target.password_env, '')
+
+    def mask(self, text: str, target: Target | None = None) -> str:
+        secrets = [self.settings.vk_token]
+        if target is not None:
+            secrets.append(self.password(target))
+        else:
+            secrets.extend(self.env.get(name, '') for name in self.password_names)
+        return _app.mask_secrets(text, secrets)
+
+    def user_facing(self, exc: BaseException) -> str:
+        return _app.user_facing(exc, HubError, 'Не удалось получить список (подробности в логе)')
+
+    # вход и листинги
+    def pam_session(self, target: Target) -> _pam.PamSession:
+        s = self.settings
+        cfg = _pam.PamConfig(
+            host=s.pam_host, port=s.pam_port, user=target.pam_user, password=self.password(target),
+            target_host=target.target_host, target_sel=target.target_sel,
+            strict_host_key=s.strict_host_key, known_hosts=s.known_hosts,
+            kex=s.kex, hostkey_algs=s.hostkey_algs, strict_algs=s.strict_algs,
+            prompt_timeout=target.prompt_timeout, prompt_nudge=s.prompt_nudge,
+            connect_retries=target.connect_retries, connect_retry_delay=target.connect_retry_delay,
+            connect_message=f'[{target.name}] SSH -> PAM %s:%s (проверка ключа хоста: %s)',
+        )
+        return _pam.PamSession(cfg, log=self.log, error_cls=HubError,
+                               mask_secrets=lambda text: self.mask(text, target))
+
+    def fetch_listings(self, target: Target) -> dict[str, list[str]]:
+        """{путь: строки листинга}. Один вход на все пути; при срыве соединения
+        сессия повторяется целиком (см. pam_session.PamSession.fetch)."""
+        from monitor.config import validate_environment
+        session = self.pam_session(target)
+
+        def once(px) -> dict[str, list[str]]:
+            results: dict[str, list[str]] = {}
+            with session.login(px) as sh:
+                for idx, path in enumerate(target.paths):
+                    begin, end, command = ls_command(idx, path, target.sudo)
+                    sh.send_command(command)
+                    self.log.info('[%s] ls -la запущен: %s', target.name, path)
+                    # retryable=False: до сюда дошли с рабочим shell, срыв на самом ls -
+                    # это висящая команда, а не заминка подключения.
+                    sh.expect_any([begin.encode()], f'ls start ({path})', timeout=30, retryable=False)
+                    sh.expect_any([end.encode()], f'ls output ({path})', timeout=60, retryable=False)
+                    raw = sh.child.before or b''
+                    self.log.info('[%s] путь %s: получено байт %d', target.name, path, len(raw))
+                    results[path] = _ls.parse_ls_block(
+                        raw, self.log, path=path, mask=lambda text: self.mask(text, target))
+            return results
+
+        with self.limiter:
+            return session.fetch(
+                once,
+                validate_config=lambda: validate_environment(
+                    self.settings, {target.name: target}, self.env, need_vk=False),
+                config_error_cls=ConfigError,
+            )
+
+    def check_paths(self, target: Target, paths: tuple[str, ...] | None = None) -> list[PathVerdict]:
+        """Один вход на ВМ: для каждого пути - существует ли, папка ли, можно ли читать."""
+        from monitor.config import validate_environment
+        paths = paths or target.paths
+        session = self.pam_session(target)
+
+        def once(px) -> list[PathVerdict]:
+            out = []
+            with session.login(px) as sh:
+                for idx, path in enumerate(paths):
+                    end, command = probe_command(idx, path)
+                    sh.send_command(command)
+                    sh.expect_any([end.encode()], f'check path ({path})', timeout=30, retryable=False)
+                    out.append(parse_verdict(path, sh.child.before or b'', target.sudo))
+            return out
+
+        with self.limiter:
+            return session.fetch(
+                once,
+                validate_config=lambda: validate_environment(
+                    self.settings, {target.name: target}, self.env, need_vk=False),
+                config_error_cls=ConfigError,
+            )
+
+    # картинки
+    def renderer(self, style_name: str) -> _ls.McRenderer:
+        with self._lock:
+            if style_name not in self._renderers:
+                style = STYLES[style_name]
+                fonts = _ls.FontProvider(
+                    self.log, _ls.FONT_DIRS, bold_fallback=style.bold_fallback,
+                    missing_message='Моноширинный шрифт не найден в %s - использую встроенный растровый.',
+                    missing_args=(', '.join(_ls.FONT_DIRS[:2]),),
+                )
+                self._renderers[style_name] = _ls.McRenderer(
+                    fonts, header_marker=style.header_marker, row_style=style.row_style)
+            return self._renderers[style_name]
+
+    def build_report(self, target: Target, listings: dict[str, list[str]]) -> Report:
+        """Листинги -> картинки и подпись (без сети). Выделено для тестов."""
+        style = STYLES[target.style]
+        renderer = self.renderer(target.style)
+        buffers: list[BytesIO] = []
+        shown: list[tuple[str, list[dict], set[str]]] = []
+        summary: list[str] = []
+        total_stale = 0
+        counted = 0
+        any_entries = False
+
+        for path in target.paths:
+            entries, parent_date = _ls.split_entries(
+                listings.get(path, []),
+                lambda line: _ls.parse_ls_line(line, style.size_display, mark_exec=style.mark_exec))
+            if not entries:
+                self.log.warning('[%s] путь %s: список пуст после разбора', target.name, path)
+                summary.append(f'{path}: пусто')
+                continue
+            any_entries = True
+            entries = style.sort(entries)
+
+            stale = _ls.stale_entries(entries, target.stale_days)
+            stale_names = {e['raw_name'] for e in stale}
+            total_stale += len(stale)
+            if stale:
+                self.log.warning('[%s] путь %s: старше %d дн.: %d',
+                                 target.name, path, target.stale_days, len(stale))
+
+            shown.append((path, entries, stale_names))
+            buffers.extend(renderer.render_pages(
+                path, entries, parent_date, stale_names, self.settings.max_rows))
+
+            files = sum(1 for e in entries if not e['is_dir'])
+            dirs = len(entries) - files
+            counted += files if style.count_files_only else len(entries)
+            summary.append(f'{path}: {files} файл(ов), {dirs} папок')
+
+        if not any_entries:
+            raise HubError(
+                f'[{target.name}] все пути дали пустой список после разбора листинга',
+                'Каталог пуст или листинг не удалось разобрать (проверьте пути и подключение)',
+            )
+
+        def caption() -> str:
+            stamp = datetime.now().strftime('%d.%m.%Y %H:%M')
+            details = '  |  '.join(summary)
+            if total_stale:
+                details += f'  |  Устарело (>{target.stale_days} дн.): {total_stale}'
+            self.log.info('[%s] сводка: %s', target.name, details)
+            if len(target.paths) > 1:
+                return stamp          # подробности по путям - только в логе
+            text = f'{stamp}  |  {style.noun}: {counted}'
+            if total_stale:
+                text += f'  |  Устарело (>{target.stale_days} дн.): {total_stale}'
+            return text
+
+        return Report(buffers, caption, shown)
+
+    def collect(self, target: Target) -> tuple[list[BytesIO], Callable[[], str]]:
+        try:
+            report = self.build_report(target, self.fetch_listings(target))
+        except Exception as exc:
+            self._note(target, False, self.user_facing(exc))
+            raise
+        self._note(target, True, f'картинок: {len(report.buffers)}')
+        self.last_report = report
+        if self.settings.state_dir:
+            try:
+                runlog.save_listing(self.settings.state_dir, target.name, target.style, report.listings)
+            except OSError as exc:
+                self.log.warning('не удалось сохранить листинг %s: %s', target.name, exc)
+        return report.buffers, report.caption
+
+    def _note(self, target: Target, ok: bool, message: str) -> None:
+        if not self.settings.state_dir:
+            return
+        try:
+            runlog.record(self.settings.state_dir, target.name, ok, message)
+        except OSError as exc:
+            self.log.warning('не удалось записать результат %s: %s', target.name, exc)
+
+    # запуск
+    def save_screenshots(self, target: Target, buffers: list[BytesIO]) -> list[str]:
+        return _ls.save_screenshots(
+            buffers, save_dir=self.settings.save_dir, prefix=target.name,
+            keep=self.settings.keep_screenshots, log=self.log)
+
+    def peers_for(self, target: Target) -> tuple[int, list[str]]:
+        """(основной получатель, дополнительные) для плановой отправки."""
+        default = int(target.peers[0]) if target.peers else self.settings.vk_peer_id
+        extras = [*target.peers[1:], *self.settings.extra_peers]
+        return default, extras
+
+    def check(self, target: Target, *, send: bool = True, open_after: bool = False,
+              peer_id: int | None = None) -> list[str]:
+        """Одна проверка. Исключения не гасит: вызывающий решает, что показать.
+        Возвращает пути сохранённых картинок. send=False: в ВК не пишет вообще."""
+        buffers, make_caption = self.collect(target)
+        saved = self.save_screenshots(target, buffers)
+        if open_after and saved:
+            _ls.open_screenshot(saved[0])
+        if send:
+            default, _ = self.peers_for(target)
+            self.vk.send_photos(saved, make_caption(), peer_id or default)
+        else:
+            self.log.info('[%s] подпись: %s (отправка отключена)', target.name, make_caption())
+        return saved
+
+    def run(self, target: Target, *, peer_id: int | None = None, open_after: bool = False) -> None:
+        """Проверка с отправкой и сообщением об ошибке в чат (для расписания и команд).
+        peer_id=None - плановая рассылка (подключаются дополнительные получатели)."""
+        default, extras = self.peers_for(target)
+        _app.run_check(
+            log=self.log, title=f'=== Проверка: {target.title} ===',
+            error_title=f'Ошибка мониторинга ({target.title})',
+            target_peer_id=peer_id, open_after=open_after, default_peer=default,
+            collect=lambda: self.collect(target),
+            save_screenshots=lambda buffers: self.save_screenshots(target, buffers),
+            open_screenshot=_ls.open_screenshot,
+            send_photos=self.vk.send_photos, send_message=self.vk.send_message,
+            user_facing=self.user_facing,
+            mask_secrets=lambda text: self.mask(text, target), extra_peers=extras,
+        )
+

@@ -20,6 +20,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import replace
@@ -28,7 +29,7 @@ from pathlib import Path
 from monitor import __version__, mailcheck, titles
 from monitor import app as _app
 from monitor.config import Settings, Target, load_targets, path_problem, validate_environment
-from monitor.engine import Engine
+from monitor.engine import LIVE_PRESETS, Engine, live_command
 from monitor.titles import tab as _tab
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -200,6 +201,52 @@ def cmd_ls(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    """Следить за командой на машине в реальном времени (top, df или своя). Ctrl+C - стоп."""
+    loaded = _load(args, need_ssh=True, need_chat=False)
+    if loaded is None:
+        return 1
+    settings, targets, _ = loaded
+    target = _find_target(args, targets)
+    if target is None:
+        return 2
+    if target.type != 'ls':
+        print('Команда live только для целей с type = "ls"', file=sys.stderr)
+        return 2
+    command = ' '.join(args.command)
+    try:
+        live_command(command)
+    except ValueError as exc:
+        print(f'Команда не подходит: {exc}', file=sys.stderr)
+        return 2
+    engine = Engine(settings, os.environ, _log(settings), targets)
+    stop = threading.Event()
+    interactive = sys.stdout.isatty()
+    limit = args.count
+    shown = 0
+
+    def frame(text: str) -> None:
+        nonlocal shown
+        shown += 1
+        if interactive:
+            sys.stdout.write('\x1b[H\x1b[2J')
+        print(f'{target.name}: {command}   (каждые {args.interval:g} с, Ctrl+C - стоп)\n')
+        print(text, flush=True)
+        if limit and shown >= limit:
+            stop.set()
+
+    with _tab(f'live {command}: {target.name}', f'live стоп: {target.name}', f'ошибка: {target.name}') as done:
+        try:
+            engine.live(target, command, frame, stop, interval=args.interval)
+        except KeyboardInterrupt:
+            stop.set()
+        except Exception as exc:
+            done(False)
+            return _fail(engine, settings, target, exc)
+        done(True)
+    return 0
+
+
 def cmd_check_paths(args: argparse.Namespace) -> int:
     loaded = _load(args, need_ssh=True, need_chat=False)
     if loaded is None:
@@ -350,6 +397,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--send', action='store_true', help='отправить картинку в мессенджер')
     p.add_argument('--open', action='store_true', help='открыть картинку в просмотрщике')
     p.set_defaults(func=cmd_ls)
+    p = sub.add_parser('live', help='следить за командой на машине в реальном времени (top, df, своя)')
+    p.add_argument('target')
+    p.add_argument('command', nargs='+', help='набор (' + ', '.join(LIVE_PRESETS) + ') или своя команда')
+    p.add_argument('-i', '--interval', type=float, default=2.0, help='пауза между кадрами, секунд')
+    p.add_argument('-n', '--count', type=int, default=0, help='остановиться после N кадров (0 - до Ctrl+C)')
+    p.set_defaults(func=cmd_live)
     p = sub.add_parser('check-paths', help='проверить пути цели (один вход на ВМ)')
     p.add_argument('target')
     p.add_argument('paths', nargs='*', help='другие пути вместо paths из цели')

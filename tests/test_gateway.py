@@ -162,3 +162,32 @@ def test_target_uses_its_own_gateway(server_factory, tmp_path):
     other = Target(name='o', title='O', pam_user=USER, password_env='GW_PW', target_host='h',
                    paths=('/s',), pam_host='127.0.0.2', pam_port='2200')
     assert engine.gateway(other) is not engine.gateway(target)
+
+
+def test_live_repeats_command_in_one_session(server_factory, tmp_path):
+    import threading
+    server = server_factory()
+    engine, target = make(server.port, tmp_path)
+    frames, stop = [], threading.Event()
+
+    def on_frame(text):
+        frames.append(text)
+        if len(frames) >= 3:
+            stop.set()
+
+    count = engine.live(target, 'top', on_frame, stop, interval=0.05)
+    assert count == 3 and len(frames) == 3
+    assert 'load average' in frames[0] and '__HUB' not in frames[0]
+    assert [e for e in server.events if e[0] == 'login'] == [('login', 1)]       # один вход на все кадры
+    assert len([e for e in server.events if e[0] == 'top']) == 3
+
+
+def test_live_hides_the_password_and_checks_the_command(server_factory, tmp_path):
+    import threading
+    server = server_factory()
+    engine, target = make(server.port, tmp_path)
+    frames, stop = [], threading.Event()
+    engine.live(target, f"echo '{PASSWORD} leaked'", lambda t: (frames.append(t), stop.set()), stop, interval=0)
+    assert frames and PASSWORD not in frames[0] and '***' in frames[0]
+    with pytest.raises(ValueError):
+        engine.live(target, 'echo a\nrm -rf /', frames.append, threading.Event())

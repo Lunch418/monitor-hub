@@ -276,3 +276,51 @@ def test_settings_screen_has_every_env_field(project):
 
 def test_log_widget_exists_and_asyncio_unused_import_guard():
     assert asyncio and Path and RichLog
+
+
+def test_live_view_streams_and_stops(project, monkeypatch):
+    seen = {}
+
+    def fake_live(self, target, command, on_frame, stop, **kw):
+        seen['command'] = command
+        for i in range(3):
+            on_frame(f'top - 12:00:0{i} up 3 days')
+            stop.wait(0.05)
+        stop.wait(5)
+        return 3
+
+    monkeypatch.setattr(engine.Engine, 'live', fake_live)
+
+    async def scenario():
+        app = make_app(project)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            await type_into(pilot, app, '#prompt-input', '/live top')
+            await pilot.press('enter')
+            await pilot.pause(0.5)
+            assert seen['command'] == 'top' and app._live_stop is not None
+            assert 'top - 12:00:0' in str(app.query_one('#preview').render())
+            assert app._window_title.startswith('[..] live: top')
+            await pilot.press('escape')                       # escape останавливает просмотр
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._live_stop is None
+            assert 'Просмотр остановлен' in log_text(app)
+            assert app._window_title.startswith('[ok] live стоп')
+    run(scenario())
+
+
+def test_live_rejects_bad_command_and_mail_target(project):
+    async def scenario():
+        app = make_app(project)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            app.action_live('')
+            await pilot.pause()
+            assert 'Команда не подходит' in log_text(app) and app._live_stop is None
+            app.query_one('#f-type', Select).value = 'mail'
+            await pilot.pause()
+            app.action_live('top')
+            await pilot.pause()
+            assert '/live работает для целей типа ls' in log_text(app)
+    run(scenario())

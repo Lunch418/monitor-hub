@@ -132,6 +132,52 @@ def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
     return begin, end, command
 
 
+# Живой просмотр: команда повторяется в одном сеансе, каждый раз выводится свежий кадр.
+# Настоящий htop рисует экран терминала, поэтому берём пакетные аналоги (top -b и т.п.).
+
+LIVE_PRESETS = {
+    'top': ('top -b -n 1 -w 160 | head -n 30', 'нагрузка и самые прожорливые процессы'),
+    'cpu': ('ps -eo pid,user,pcpu,pmem,etime,comm --sort=-pcpu | head -n 15', 'процессы по CPU'),
+    'mem': ('free -h; echo; ps -eo pid,user,pmem,rss,comm --sort=-pmem | head -n 12', 'память и процессы по ней'),
+    'df': ('df -hT -x tmpfs -x devtmpfs -x squashfs', 'свободное место на дисках'),
+    'net': ('ss -s; echo; ss -tn state established | head -n 15', 'сетевые соединения'),
+    'uptime': ('uptime; echo; w -h | head -n 15', 'аптайм и кто вошёл'),
+}
+LIVE_MAX_COMMAND = 300
+LIVE_MAX_LINES = 200
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07')
+
+
+def live_command(text: str) -> str:
+    """Имя набора (top, df...) или своя команда -> команда для оболочки. ValueError, если она не подходит."""
+    text = text.strip()
+    if text in LIVE_PRESETS:
+        return LIVE_PRESETS[text][0]
+    if not text:
+        raise ValueError('укажите набор (' + ', '.join(LIVE_PRESETS) + ') или свою команду')
+    if len(text) > LIVE_MAX_COMMAND or any(ord(ch) < 32 for ch in text):
+        raise ValueError(f'команда: одна строка, не длиннее {LIVE_MAX_COMMAND} символов')
+    return text
+
+
+def clean_frame(raw: bytes, limit: int = LIVE_MAX_LINES) -> str:
+    """Вывод удалённой команды -> безопасный текст: без управляющих последовательностей, не длиннее limit строк."""
+    text = _ANSI_RE.sub('', raw.decode('utf-8', 'replace')).replace('\r', '')
+    text = ''.join(ch for ch in text if ch in '\n\t' or ch.isprintable())
+    lines = text.strip('\n').split('\n')
+    if len(lines) > limit:
+        lines = [*lines[:limit], f'... (ещё строк: {len(lines) - limit})']
+    return '\n'.join(lines)
+
+
+def exec_command(idx: int, command: str) -> tuple[str, str, str]:
+    """(маркер_начала, маркер_конца, команда): как ls_command, но для любой команды."""
+    begin = f'__HUB{idx}_BEG__'
+    end = f'__HUB{idx}_END__'
+    full = f"printf '__HUB%s__\\n' {idx}_BEG; {command}; printf '__HUB%s__\\n' {idx}_END"
+    return begin, end, full
+
+
 # Проверка путей
 
 VERDICTS = {
@@ -331,6 +377,37 @@ class Engine:
                     results[path] = _ls.parse_ls_block(
                         raw, self.log, path=path, mask=lambda text: self.mask(text, target))
             return results
+
+        with self.gateway(target):
+            return session.fetch(
+                once,
+                validate_config=lambda: validate_environment(
+                    self.settings, {target.name: target}, self.env, need_chat=False),
+                config_error_cls=ConfigError,
+            )
+
+    def live(self, target: Target, command: str, on_frame: Callable[[str], None], stop: threading.Event, *,
+             interval: float = 2.0, max_seconds: float = 900.0) -> int:
+        """Повторяет команду на машине в одном сеансе, пока не сработает stop или не пройдёт max_seconds.
+        Каждый кадр (вывод команды) отдаётся в on_frame. Возвращает число кадров."""
+        from monitor.config import validate_environment
+        command = live_command(command)
+        session = self.pam_session(target)
+        frames = 0
+
+        def once(px) -> int:
+            nonlocal frames
+            deadline = time.monotonic() + max_seconds
+            with session.login(px) as sh:
+                while not stop.is_set() and time.monotonic() < deadline:
+                    begin, end, full = exec_command(frames, command)
+                    sh.send_command(full)
+                    sh.expect_any([begin.encode()], 'live start', timeout=30, retryable=False)
+                    sh.expect_any([end.encode()], 'live output', timeout=60, retryable=False)
+                    frames += 1
+                    on_frame(self.mask(clean_frame(sh.child.before or b''), target))
+                    stop.wait(interval)
+            return frames
 
         with self.gateway(target):
             return session.fetch(

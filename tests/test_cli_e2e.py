@@ -81,3 +81,12 @@ def test_unknown_target_is_a_clean_error(hub):
     done = run('check', 'nope')
     assert done.returncode != 0
     assert 'Traceback' not in done.stdout + done.stderr
+
+
+def test_live_prints_frames_and_stops(hub):
+    run, _ = hub
+    done = run('live', 'web', 'top', '-n', '2', '-i', '0.1')
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.count('load average') == 2
+    assert run('live', 'web', 'bad\tcmd').returncode == 2
+    assert run('live', 'nope', 'top').returncode == 2

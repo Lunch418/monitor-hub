@@ -134,3 +134,25 @@ def test_run_scheduled_goes_to_default_and_extras(engine, monkeypatch, no_sleep)
     monkeypatch.setattr(engine.chat, 'send_photos', lambda paths, caption, peer: sent.append(peer))
     engine.run(make_target(peers=('5', '6')))
     assert sent == [5, 6]
+
+
+def test_live_command_presets_and_validation():
+    assert eng.live_command('df').startswith('df ')
+    assert eng.live_command('  uptime ').startswith('uptime')
+    assert eng.live_command('tail -n 5 /var/log/syslog') == 'tail -n 5 /var/log/syslog'
+    for bad in ('', '   ', 'a\nb', 'x' * 400, 'a\x00b'):
+        with pytest.raises(ValueError):
+            eng.live_command(bad)
+
+
+def test_clean_frame_strips_terminal_control_and_limits_lines():
+    raw = b'\x1b[2J\x1b[Htop - 12:00\r\n\x1b[31mred\x1b[0m\x07 text\x00\n' + b'line\n' * 300
+    text = eng.clean_frame(raw, limit=5)
+    assert '\x1b' not in text and '\x07' not in text and '\x00' not in text and '\r' not in text
+    assert text.startswith('top - 12:00\nred text') and text.endswith('(ещё строк: 297)')
+
+
+def test_exec_command_markers_are_built_remotely():
+    begin, end, full = eng.exec_command(3, 'uptime')
+    assert begin == '__HUB3_BEG__' and end == '__HUB3_END__'
+    assert begin not in full and end not in full                    # в набранной команде маркеров нет

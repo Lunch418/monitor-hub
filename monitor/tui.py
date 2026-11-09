@@ -41,7 +41,7 @@ from monitor.config import (
     validate_environment,
 )
 from monitor.engine import STYLES as REPORT_STYLES
-from monitor.engine import Engine
+from monitor.engine import Engine, live_command
 from monitor.envfile import set_env_value
 from monitor.formspec import (
     ENV_FIELDS,
@@ -257,7 +257,7 @@ class HubApp(App):
         Binding('ctrl+e', 'settings', 'настройки', priority=True),
         Binding('ctrl+l', 'status', 'статус', priority=True),
         Binding('ctrl+o', 'open_image', 'картинка', priority=True),
-        Binding('escape', 'focus_targets', 'цели', show=False),
+        Binding('escape', 'escape', 'стоп / цели', show=False),
         Binding('ctrl+q', 'quit', 'выход', priority=True),
     ]
     CSS = f"""
@@ -319,6 +319,7 @@ class HubApp(App):
         self.settings = Settings()
         self.log_ = logging.getLogger('monitor_hub.tui')
         self.engine: Engine | None = None
+        self._live_stop: threading.Event | None = None     # идёт живой просмотр
 
     # вид
     def compose(self) -> ComposeResult:
@@ -374,6 +375,7 @@ class HubApp(App):
         table.focus()
 
     def on_unmount(self) -> None:
+        self.action_stop_live()
         self._write_terminal(titles.RESTORE)
         logging.getLogger('monitor_hub').removeHandler(self._journal)
 
@@ -655,6 +657,17 @@ class HubApp(App):
             self._set(field_id, values[field_id])
         self.say(f'{field_id} = {values[field_id]}  (не забудьте /save)', DIM)
 
+    def _cmd_live(self, command) -> None:
+        _, rest = self._target_and_rest(command.args)
+        self.action_live(' '.join(rest))
+
+    def _cmd_top(self, command) -> None:
+        self._target_and_rest(command.args)
+        self.action_live('top')
+
+    def _cmd_stop(self, command) -> None:
+        self.action_stop_live()
+
     def _cmd_save(self, command) -> None:
         self.action_save()
 
@@ -682,6 +695,13 @@ class HubApp(App):
         if isinstance(self.screen, SettingsScreen) and action != 'quit':
             return False
         return True
+
+    def action_escape(self) -> None:
+        """Escape: остановить живой просмотр, а если его нет - вернуться к списку целей."""
+        if self._live_stop is not None:
+            self.action_stop_live()
+        else:
+            self.action_focus_targets()
 
     def action_focus_targets(self) -> None:
         self.query_one('#targets', DataTable).focus()
@@ -884,6 +904,63 @@ class HubApp(App):
             listing_preview(report.listings, target.style, self._preview_width()))
         self.query_one('#preview-panel').border_title = f'предпросмотр: {target.name} {path}'
         self.headline(self._sent_text(send) if send else f'Готово: {path}', OK)
+
+    # живой просмотр
+    def action_live(self, command: str) -> None:
+        if self._kind() != 'ls':
+            self.headline('/live работает для целей типа ls (по ssh)', ERR)
+            return
+        try:
+            live_command(command)
+        except ValueError as exc:
+            self.headline(f'Команда не подходит: {exc}', ERR)
+            return
+        target, password = self._target_for_run()
+        if target is None:
+            return
+        extra = {target.password_env: password} if password else {}
+        if not self._env_ready(target, extra, False):
+            return
+        self.action_stop_live()
+        stop = threading.Event()
+        self._live_stop = stop
+        self.headline(f'Слежу за {target.name}: {command}  (escape - стоп)', ACCENT)
+        self.set_window_title(f'[..] live: {command}')
+        self._live_worker(target, command, extra, stop)
+
+    def action_stop_live(self) -> None:
+        if self._live_stop is not None:
+            self._live_stop.set()
+
+    @work(thread=True, exclusive=True, group='live')
+    def _live_worker(self, target: Target, command: str, extra: dict[str, str], stop: threading.Event) -> None:
+        engine = self._make_engine(extra)
+        try:
+            engine.live(target, command, lambda text: self.call_from_thread(
+                self._live_frame, target, command, text, stop), stop)
+        except Exception as exc:
+            self.call_from_thread(self._live_done, target, stop, engine.mask(engine.user_facing(exc), target))
+            return
+        self.call_from_thread(self._live_done, target, stop, '')
+
+    def _live_frame(self, target: Target, command: str, text: str, stop: threading.Event) -> None:
+        if stop.is_set():
+            return
+        out = Text()
+        out.append(f'{command}   обновлено {time.strftime("%H:%M:%S")}   escape - стоп\n\n', style=DIM)
+        out.append(text)
+        self.query_one('#preview', Static).update(out)
+        self.query_one('#preview-panel').border_title = f'live: {target.name}'
+
+    def _live_done(self, target: Target, stop: threading.Event, error: str) -> None:
+        if self._live_stop is stop:
+            self._live_stop = None
+        if error:
+            self.set_window_title(f'[!] live: {target.name}')
+            self.headline(f'Просмотр остановлен: {error}', ERR)
+        else:
+            self.set_window_title(f'[ok] live стоп: {target.name}')
+            self.headline('Просмотр остановлен', OK)
 
     def action_check_paths(self) -> None:
         target, password = self._target_for_run()

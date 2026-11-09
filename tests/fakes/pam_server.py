@@ -104,6 +104,10 @@ def _run_command(line: str, chan, log: list, listings=None, denied=(), states=No
             chan.send(m.group(1).encode() + b'\r\n')
             continue
         words = shlex.split(part)
+        if words and words[0] == 'top':
+            log.append(('top',))
+            chan.send(b'top - 12:00:01 up 3 days,  1 user,  load average: 0.10\r\n  PID USER  %CPU COMMAND\r\n')
+            continue
         if 'ls' in words:
             path = words[-1]
             log.append(('ls', path, 'sudo' in words))

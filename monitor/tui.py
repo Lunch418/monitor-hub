@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from rich.text import Text
 from textual import on, work
@@ -488,14 +488,10 @@ class HubApp(App):
 
     # форма
     def _widget(self, name: str) -> Input | Select:
-        widget = self.query_one(f'#f-{name}')
-        assert isinstance(widget, (Input, Select))
-        return widget
+        return cast('Input | Select', self.query_one(f'#f-{name}'))
 
     def _input(self, name: str) -> Input:
-        widget = self.query_one(f'#f-{name}')
-        assert isinstance(widget, Input)
-        return widget
+        return self.query_one(f'#f-{name}', Input)
 
     def _get(self, name: str) -> str:
         widget = self._widget(name)

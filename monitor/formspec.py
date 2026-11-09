@@ -123,7 +123,7 @@ def values_from_target(target: Target) -> dict[str, str]:
         'schedule': ', '.join(str(s) for s in target.schedule), 'command': target.command,
         'peers': ', '.join(target.peers), 'prompt_timeout': str(target.prompt_timeout),
         'connect_retries': str(target.connect_retries), 'connect_retry_delay': str(target.connect_retry_delay),
-        'run_timeout': str(target.run_timeout), 'password': '',
+        'run_timeout': str(target.run_timeout),
     }
     return values
 

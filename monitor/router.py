@@ -23,6 +23,7 @@ class Action:
     kind: str                       # 'run' | 'reply' | 'deny'
     target: Target | None = None
     text: str = ''
+    arg: str = ''                   # слова после команды (у mail это дата)
 
 
 class Router:
@@ -65,10 +66,10 @@ class Router:
         if word == '/targets':
             return Action('reply', text=self.describe() or 'Целей нет')
         if word == '/run':
-            if len(parts) != 2:
+            if len(parts) < 2:
                 return Action('reply', text='Укажите цель: /run <имя>\n' + self.describe())
             target = self.targets.get(parts[1])
             if target is None:
                 return Action('reply', text=f'Нет такой цели: {parts[1]}\n' + self.describe())
-            return Action('run', target)
-        return Action('run', self.by_command[word])
+            return Action('run', target, arg=' '.join(parts[2:]))
+        return Action('run', self.by_command[word], arg=' '.join(parts[1:]))

@@ -17,16 +17,19 @@ cli.py - командная строка monitor-hub.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
-from monitor import __version__
+from monitor import __version__, mailcheck, titles
 from monitor import app as _app
-from monitor.config import Settings, Target, load_targets, validate_environment
+from monitor.config import Settings, Target, load_targets, path_problem, validate_environment
 from monitor.engine import Engine
+from monitor.titles import tab as _tab
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -94,8 +97,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def _describe(target: Target) -> str:
     when = ', '.join(str(s) for s in target.schedule) or 'только вручную'
-    return (f'{target.name:12} {target.title:24} {target.target_host:16} '
-            f'{",".join(target.paths)}  [{when}]  {target.command or "-"}')
+    if target.type == 'mail':
+        host, what = target.imap_host, f'письма: {len(target.expect)} маш.'
+    else:
+        host = target.target_host + (' (ssh)' if target.via == 'ssh' else '')
+        what = ','.join(target.paths)
+    return f'{target.name:12} {target.title:24} {host:18} {what}  [{when}]  {target.command or "-"}'
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -107,26 +114,89 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _find_target(args: argparse.Namespace, targets: dict[str, Target]) -> Target | None:
+    target = targets.get(args.target)
+    if target is None:
+        print(f'Нет такой цели: {args.target}. Есть: {", ".join(targets)}', file=sys.stderr)
+    return target
+
+
+def _fail(engine: Engine, settings: Settings, target: Target, exc: Exception) -> int:
+    text = engine.mask(str(exc), target)
+    print(f'Ошибка: {text}', file=sys.stderr)
+    message = text if text.startswith('[') else f'[{target.name}] {text}'
+    log = _log(settings)
+    if _CONSOLE is not None:           # трассировка только в файл лога: терминал не засоряем
+        _CONSOLE.setLevel(logging.CRITICAL + 1)
+    try:
+        log.error('%s', message, exc_info=True)
+    finally:
+        if _CONSOLE is not None:
+            _CONSOLE.setLevel(logging.NOTSET)
+    return 1
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     loaded = _load(args, need_ssh=True, need_chat=not args.no_send)
     if loaded is None:
         return 1
     settings, targets, _ = loaded
-    if args.target not in targets:
-        print(f'Нет такой цели: {args.target}. Есть: {", ".join(targets)}', file=sys.stderr)
+    target = _find_target(args, targets)
+    if target is None:
         return 2
-    target = targets[args.target]
     engine = Engine(settings, os.environ, _log(settings), targets)
-    try:
-        saved = engine.check(target, send=not args.no_send, open_after=args.open)
-    except Exception as exc:
-        text = engine.mask(str(exc), target)
-        print(f'Ошибка: {text}', file=sys.stderr)
-        _log(settings).error('[%s] %s', target.name, text, exc_info=True)
-        return 1
+    where = engine.chat.label
+    with _tab(f'проверяю: {target.name}', f'готово: {target.name}', f'ошибка: {target.name}') as done:
+        try:
+            if target.type == 'mail':
+                report = engine.check_mail(target, send=not args.no_send,
+                                           check_date=mailcheck.parse_date_arg(args.date))
+                print(report)
+                saved: list[str] = []
+            else:
+                saved = engine.check(target, send=not args.no_send, open_after=args.open)
+        except Exception as exc:
+            done(False)
+            return _fail(engine, settings, target, exc)
+        done(True)
     for path in saved:
         print(path)
-    print('Отправлено в ВК.' if not args.no_send else 'Готово (в ВК не отправлялось).')
+    print(f'Отправлено: {where}.' if not args.no_send else f'Готово ({where}: ничего не отправлялось).')
+    return 0
+
+
+def cmd_ls(args: argparse.Namespace) -> int:
+    """Срочно посмотреть содержимое папки на цели (без правки конфигурации)."""
+    loaded = _load(args, need_ssh=True, need_chat=args.send)
+    if loaded is None:
+        return 1
+    settings, targets, _ = loaded
+    target = _find_target(args, targets)
+    if target is None:
+        return 2
+    if target.type != 'ls':
+        print('Команда ls только для целей с type = "ls"', file=sys.stderr)
+        return 2
+    problem = path_problem(args.path)
+    if problem:
+        print(f'Путь не подходит: {problem}', file=sys.stderr)
+        return 2
+    engine = Engine(settings, os.environ, _log(settings), targets)
+    one = replace(target, paths=(args.path,))
+    with _tab(f'ls {args.path}', f'готово: {target.name}', f'ошибка: {target.name}') as done:
+        try:
+            lines = engine.fetch_listings(one, (args.path,))[args.path]
+            done(True)
+        except Exception as exc:
+            done(False)
+            return _fail(engine, settings, target, exc)
+    print('\n'.join(lines))
+    if args.send or args.open:
+        try:
+            for path in engine.check(one, send=args.send, open_after=args.open):
+                print(path)
+        except Exception as exc:
+            return _fail(engine, settings, target, exc)
     return 0
 
 
@@ -135,9 +205,11 @@ def cmd_check_paths(args: argparse.Namespace) -> int:
     if loaded is None:
         return 1
     settings, targets, _ = loaded
-    target = targets.get(args.target)
+    target = _find_target(args, targets)
     if target is None:
-        print(f'Нет такой цели: {args.target}. Есть: {", ".join(targets)}', file=sys.stderr)
+        return 2
+    if target.type != 'ls':
+        print('Команда check-paths только для целей с type = "ls"', file=sys.stderr)
         return 2
     engine = Engine(settings, os.environ, _log(settings), targets)
     try:
@@ -169,8 +241,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     hub = _hub(settings, targets)
     daemon = _daemon(settings)
     daemon.install_signal_handlers()
-    daemon.foreground(preflight=lambda: True, scheduler_loop=hub.serve,
-                      message=f'monitor-hub запущен в терминале, целей: {len(targets)}')
+    titles.write(titles.SAVE)
+    titles.set_title(f'служба, целей: {len(targets)}')
+    try:
+        daemon.foreground(preflight=lambda: True, scheduler_loop=hub.serve,
+                          message=f'monitor-hub запущен в терминале, целей: {len(targets)}')
+    finally:
+        titles.write(titles.RESTORE)
     return 0
 
 
@@ -262,10 +339,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser('check', help='выполнить проверку цели сейчас')
     p.add_argument('target')
-    p.add_argument('--no-send', action='store_true', help='сохранить картинки, но не писать в ВК')
+    p.add_argument('--no-send', action='store_true', help='сохранить картинки, но ничего не отправлять')
     p.add_argument('--open', action='store_true', help='открыть картинку в просмотрщике')
+    p.add_argument('--date', default='', help='для целей mail: ночь на дату (вчера, 26.07, 26.07.2026)')
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser('ls', help='показать содержимое папки на цели прямо сейчас')
+    p.add_argument('target')
+    p.add_argument('path', help='абсолютный путь')
+    p.add_argument('--send', action='store_true', help='отправить картинку в мессенджер')
+    p.add_argument('--open', action='store_true', help='открыть картинку в просмотрщике')
+    p.set_defaults(func=cmd_ls)
     p = sub.add_parser('check-paths', help='проверить пути цели (один вход на ВМ)')
     p.add_argument('target')
     p.add_argument('paths', nargs='*', help='другие пути вместо paths из цели')

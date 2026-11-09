@@ -34,7 +34,7 @@ class Hub:
         self._spawn = spawn or _start_thread
 
     # запуск одной цели
-    def run_target(self, target: Target, peer_id: int | None = None) -> threading.Thread | None:
+    def run_target(self, target: Target, peer_id: int | None = None, arg: str = '') -> threading.Thread | None:
         """Запускает проверку в потоке. None - цель уже выполняется."""
         lock = self.locks[target.name]
         if not lock.acquire(blocking=False):
@@ -43,14 +43,14 @@ class Hub:
             else:
                 self.log.warning('[%s] плановая проверка пропущена: предыдущая ещё идёт', target.name)
             return None
-        return self._spawn(self._worker, target, peer_id, lock)
+        return self._spawn(self._worker, target, peer_id, lock, arg)
 
-    def _worker(self, target: Target, peer_id: int | None, lock: threading.Lock) -> None:
+    def _worker(self, target: Target, peer_id: int | None, lock: threading.Lock, arg: str = '') -> None:
         watchdog = threading.Timer(target.run_timeout, self._too_long, args=(target, peer_id))
         watchdog.daemon = True
         watchdog.start()
         try:
-            self.engine.run(target, peer_id=peer_id)
+            self.engine.run(target, peer_id=peer_id, arg=arg)
         except Exception:      # Engine.run сам сообщает об ошибках; это последний рубеж
             self.log.critical('[%s] необработанная ошибка проверки', target.name, exc_info=True)
         finally:
@@ -80,7 +80,7 @@ class Hub:
             self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'run' and action.target is not None:
             self.log.info('[%s] команда от %s (peer %s)', action.target.name, from_id, peer_id)
-            if self.run_target(action.target, peer_id) is not None:
+            if self.run_target(action.target, peer_id, action.arg) is not None:
                 self.engine.chat.send_message(peer_id, f'Проверяю: {action.target.title}...')
 
     def poll(self) -> None:

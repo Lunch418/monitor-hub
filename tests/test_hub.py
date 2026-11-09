@@ -29,7 +29,7 @@ def make_hub(tmp_path):
         targets = targets or {'crl': target(), 'pg': target('pg', '/pg')}
         engine = eng.Engine(settings, {}, logging.getLogger('hub-test'), targets)
         engine.chat = FakeVk()
-        engine.run = runner or (lambda t, peer_id=None: None)
+        engine.run = runner or (lambda t, peer_id=None, arg="": None)
         hub = Hub(engine, targets, settings, logging.getLogger('hub-test'))
         hub.spawned = []
         spawn = hub._spawn
@@ -46,7 +46,7 @@ def make_hub(tmp_path):
 
 def test_command_from_chat_runs_target_and_acks(make_hub):
     calls = []
-    hub = make_hub(runner=lambda t, peer_id=None: calls.append((t.name, peer_id)))
+    hub = make_hub(runner=lambda t, peer_id=None, arg="": calls.append((t.name, peer_id)))
     hub.on_message(55, '7', '/get')
     for thread in hub.spawned:
         thread.join(timeout=2)
@@ -65,7 +65,7 @@ def test_denied_and_reply(make_hub):
 def test_same_target_is_not_run_twice_at_once(make_hub):
     started, release = threading.Event(), threading.Event()
 
-    def slow(t, peer_id=None):
+    def slow(t, peer_id=None, arg=""):
         started.set()
         release.wait(5)
 
@@ -86,7 +86,7 @@ def test_same_target_is_not_run_twice_at_once(make_hub):
 def test_crash_in_one_target_releases_lock_and_others_work(make_hub):
     done = []
 
-    def runner(t, peer_id=None):
+    def runner(t, peer_id=None, arg=""):
         if t.name == 'crl':
             raise RuntimeError('boom')
         done.append(t.name)
@@ -101,7 +101,7 @@ def test_crash_in_one_target_releases_lock_and_others_work(make_hub):
 def test_watchdog_reports_slow_check(make_hub):
     release = threading.Event()
     targets = {'crl': target(run_timeout=60)}
-    hub = make_hub(targets=targets, runner=lambda t, peer_id=None: release.wait(5))
+    hub = make_hub(targets=targets, runner=lambda t, peer_id=None, arg="": release.wait(5))
     original = threading.Timer
 
     class FastTimer(original):
@@ -126,7 +126,7 @@ def test_watchdog_reports_slow_check(make_hub):
 def test_serve_runs_due_jobs(make_hub):
     from datetime import datetime
     calls = []
-    hub = make_hub(runner=lambda t, peer_id=None: calls.append(t.name))
+    hub = make_hub(runner=lambda t, peer_id=None, arg="": calls.append(t.name))
     for job in hub.scheduler.jobs:
         job.next_run = datetime.now()
     hub.serve(ticks=1, sleep=lambda s: None, start_poll=False)

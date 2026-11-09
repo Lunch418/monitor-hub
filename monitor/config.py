@@ -475,6 +475,15 @@ def load_targets(path: str | Path) -> tuple[dict[str, Target], list[str]]:
     return parse_targets(data)
 
 
+def path_problem(path: str) -> str:
+    """Почему путь нельзя использовать (пустая строка - можно)."""
+    if not path.startswith('/'):
+        return 'нужен абсолютный путь (начинается с /)'
+    if not SAFE_PATH_RE.match(path):
+        return 'недопустимые символы (можно буквы, цифры, пробел и _ . / ~ -)'
+    return ''
+
+
 # Проверка вместе с окружением
 
 def validate_environment(settings: Settings, targets: Mapping[str, Target], env: Mapping[str, str], *,

@@ -8,6 +8,8 @@ engine.py - проверка одной цели: вход через PAM, `ls -
 
 from __future__ import annotations
 
+import imaplib
+import os
 import re
 import shlex
 import threading
@@ -15,13 +17,13 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from io import BytesIO
 
 from monitor import app as _app
 from monitor import ls_report as _ls
+from monitor import mailcheck, runlog
 from monitor import pam_session as _pam
-from monitor import runlog
 from monitor.config import Settings, Target
 from monitor.messengers import make_messenger
 
@@ -307,7 +309,7 @@ class Engine:
                 self._limiters[key] = GatewayLimiter(s.max_parallel, s.login_gap)
             return self._limiters[key]
 
-    def fetch_listings(self, target: Target) -> dict[str, list[str]]:
+    def fetch_listings(self, target: Target, paths: tuple[str, ...] | None = None) -> dict[str, list[str]]:
         """{путь: строки листинга}. Один вход на все пути; при срыве соединения
         сессия повторяется целиком (см. pam_session.PamSession.fetch)."""
         from monitor.config import validate_environment
@@ -316,7 +318,7 @@ class Engine:
         def once(px) -> dict[str, list[str]]:
             results: dict[str, list[str]] = {}
             with session.login(px) as sh:
-                for idx, path in enumerate(target.paths):
+                for idx, path in enumerate(paths or target.paths):
                     begin, end, command = ls_command(idx, path, target.sudo)
                     sh.send_command(command)
                     self.log.info('[%s] ls -la запущен: %s', target.name, path)
@@ -470,6 +472,70 @@ class Engine:
         extras = [*target.peers[1:], *self.settings.extra_peers]
         return default, extras
 
+    # письма (type = "mail")
+    def mail_query(self, target: Target) -> mailcheck.MailQuery:
+        return mailcheck.MailQuery(
+            host=target.imap_host, port=target.imap_port, user=target.imap_user,
+            password=self.password(target), ssl=target.imap_ssl, folders=target.folders,
+            mail_from=target.mail_from, subject_re=target.subject_re,
+            ok_words=target.ok_words or mailcheck.DEFAULT_OK_WORDS,
+            fail_words=target.fail_words or mailcheck.DEFAULT_FAIL_WORDS)
+
+    def mail_report(self, target: Target, check_date: date | None = None) -> tuple[str, list[str], dict]:
+        """(текст отчёта, ожидаемые машины, результаты). Нечего ожидать - в IMAP не ходим."""
+        check_date = check_date or date.today()
+        expected = mailcheck.expected_names(dict(target.expect), check_date)
+        results: dict = {}
+        if expected:
+            start, end = mailcheck.night_window(check_date, target.night_from, target.night_to)
+            try:
+                results = mailcheck.fetch_results(
+                    self.mail_query(target), expected, start, end, self.log,
+                    save_dir=os.path.join(self.settings.save_dir, 'mail', target.name))
+            except (OSError, imaplib.IMAP4.error) as exc:
+                raise HubError(
+                    f'[{target.name}] IMAP: {self.mask(str(exc), target)}',
+                    'Не удалось получить письма (проверьте настройки почты и пароль)') from exc
+        report = mailcheck.build_report(target.title, check_date, expected, results)
+        good = sum(1 for v in results.values() if v['status'] == 'ok')
+        self._note(target, True, f'{good} из {len(expected)} успешно' if expected else 'бэкапов не ждали')
+        return report, expected, results
+
+    def check_mail(self, target: Target, *, send: bool = True, peer_id: int | None = None,
+                   check_date: date | None = None) -> str:
+        """Одна проверка писем. Возвращает текст отчёта; send=False в мессенджер не пишет."""
+        try:
+            report, _, _ = self.mail_report(target, check_date)
+        except Exception as exc:
+            self._note(target, False, self.user_facing(exc))
+            raise
+        if send:
+            for part in mailcheck.split_message(report):
+                self.chat.send_message(peer_id or self.peers_for(target)[0], part)
+        return report
+
+    def _run_mail(self, target: Target, peer_id: int | None, arg: str) -> None:
+        default, extras = self.peers_for(target)
+        peer = peer_id or default
+        self.log.info('=== Проверка: %s ===', target.title)
+        try:
+            check_date = mailcheck.parse_date_arg(arg)
+            report, expected, _ = self.mail_report(target, check_date)
+            if not expected and peer_id is None:
+                self.log.info('[%s] в ночь на %s бэкапы не ждали - молчу', target.name, check_date)
+            else:
+                recipients = [peer]
+                if peer_id is None:
+                    recipients += [int(x) for x in extras if re.fullmatch(r'-?\d+', x)]
+                for recipient in recipients:
+                    for part in mailcheck.split_message(report):
+                        self.chat.send_message(recipient, part)
+        except Exception as exc:
+            self._note(target, False, self.user_facing(exc))
+            self.log.error('Ошибка: %s', self.mask(str(exc), target), exc_info=True)
+            self.chat.send_message(peer, f'Ошибка мониторинга ({target.title}): {self.user_facing(exc)}')
+        self.log.info('=== Готово ===')
+
     def check(self, target: Target, *, send: bool = True, open_after: bool = False,
               peer_id: int | None = None) -> list[str]:
         """Одна проверка. Исключения не гасит: вызывающий решает, что показать.
@@ -485,9 +551,14 @@ class Engine:
             self.log.info('[%s] подпись: %s (отправка отключена)', target.name, make_caption())
         return saved
 
-    def run(self, target: Target, *, peer_id: int | None = None, open_after: bool = False) -> None:
+    def run(self, target: Target, *, peer_id: int | None = None, open_after: bool = False,
+            arg: str = '') -> None:
         """Проверка с отправкой и сообщением об ошибке в чат (для расписания и команд).
-        peer_id=None - плановая рассылка (подключаются дополнительные получатели)."""
+        peer_id=None - плановая рассылка (подключаются дополнительные получатели).
+        arg - слова после команды в беседе (для mail это дата: вчера, 26.07)."""
+        if target.type == 'mail':
+            self._run_mail(target, peer_id, arg)
+            return
         default, extras = self.peers_for(target)
         _app.run_check(
             log=self.log, title=f'=== Проверка: {target.title} ===',

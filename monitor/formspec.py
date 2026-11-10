@@ -248,6 +248,7 @@ ENV_FIELDS: tuple[EnvField, ...] = (
     EnvField('TELEGRAM_CHAT_ID', 'TG чат', 'id чата по умолчанию (у групп отрицательный)', kind='int'),
     EnvField('ALLOWED_USERS', 'кому можно', 'id пользователей через запятую; пусто - никому', kind='ids'),
     EnvField('ALLOW_ANY_USER', 'всем можно', choices=(('нет', ''), ('да', '1'))),
+    EnvField('ALLOWED_CHATS', 'беседы для команд', 'пусто - из любой; иначе только из этих id', kind='ids'),
     EnvField('EXTRA_PEERS', 'доп. беседы', 'для плановой рассылки, через запятую', kind='ids'),
     EnvField('PAM_HOST', 'PAM шлюз', 'общий для целей через PAM'),
     EnvField('PAM_PORT', 'PAM порт', '2222', kind='int'),

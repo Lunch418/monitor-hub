@@ -188,3 +188,15 @@ def test_gateway_limiter_caps_parallel_logins():
     t1.join(2)
     t2.join(2)
     assert order == ['first', 'second']
+
+
+def test_command_from_foreign_chat_is_denied(make_hub):
+    calls = []
+    hub = make_hub(allowed_chats=frozenset({'100'}),
+                   runner=lambda t, peer_id=None, arg="": calls.append(peer_id))
+    hub.on_message(55, '7', '/get')            # разрешённый пользователь, но чужая беседа
+    hub.on_message(55, '7', 'просто текст')
+    assert hub.engine.chat.messages == [(55, 'Из этой беседы команды не принимаются')]
+    assert calls == []
+    hub.on_message(100, '7', '/targets')
+    assert '/get - CRL' in hub.engine.chat.messages[-1][1]

@@ -7,7 +7,8 @@ router.py - разбор сообщений беседы: команда -> де
 
 Права: команды принимаются только от ALLOWED_USERS (пустой список - никому), либо
 от всех при явном ALLOW_ANY_USER=1. Отказ получает только тот, кто написал
-настоящую команду: на обычные сообщения бот не отвечает.
+настоящую команду: на обычные сообщения бот не отвечает. Если задан ALLOWED_CHATS,
+команды принимаются только из этих бесед (иначе листинг уйдёт в любую, куда добавлен бот).
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ class Router:
         return ('Команды:\n' + self.describe()
                 + '\n/targets - список целей\n/run <имя> - запустить цель по имени\n/help - эта справка')
 
-    def handle(self, text: str, from_id: str) -> Action | None:
+    def handle(self, text: str, from_id: str, peer_id: int | None = None) -> Action | None:
         """None - это не команда, отвечать не нужно."""
         parts = text.strip().lower().split()
         if not parts or not parts[0].startswith('/'):
@@ -60,6 +61,9 @@ class Router:
             return None
         if not self.authorized(from_id):
             return Action('deny', text='Доступ запрещён')
+        chats = self.settings.allowed_chats
+        if chats and peer_id is not None and str(peer_id) not in chats:
+            return Action('deny', text='Из этой беседы команды не принимаются')
 
         if word == '/help':
             return Action('reply', text=self.help_text())

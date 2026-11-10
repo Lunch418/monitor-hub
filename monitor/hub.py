@@ -70,7 +70,7 @@ class Hub:
 
     # беседа
     def on_message(self, peer_id: int, from_id: str, text: str) -> None:
-        action = self.router.handle(text, from_id)
+        action = self.router.handle(text, from_id, peer_id)
         if action is None:
             return
         if action.kind == 'deny':

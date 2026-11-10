@@ -150,6 +150,7 @@ class Settings:
     allowed_users: frozenset[str] = frozenset()
     allow_any_user: bool = False   # явное разрешение команд всем в беседе
     extra_peers: tuple[str, ...] = ()
+    allowed_chats: frozenset[str] = frozenset()      # пусто - команды принимаются из любой беседы
     strict_host_key: str = 'accept-new'
     kex: str = 'diffie-hellman-group14-sha1,diffie-hellman-group1-sha1'
     hostkey_algs: str = 'ssh-rsa'
@@ -187,6 +188,7 @@ class Settings:
             allowed_users=frozenset(_env_list('ALLOWED_USERS')),
             allow_any_user=_env_bool('ALLOW_ANY_USER', False),
             extra_peers=tuple(_env_list('EXTRA_PEERS')),
+            allowed_chats=frozenset(_env_list('ALLOWED_CHATS')),
             strict_host_key=_env('SSH_STRICT_HOST_KEY', default.strict_host_key),
             kex=_env('SSH_KEX', default.kex),
             hostkey_algs=_env('SSH_HOSTKEY_ALGS', default.hostkey_algs),
@@ -522,6 +524,9 @@ def validate_environment(settings: Settings, targets: Mapping[str, Target], env:
                 problems.append('VK_TOKEN не задан')
             if not settings.vk_peer_id:
                 problems.append('VK_PEER_ID не задан')
+        for chat in settings.allowed_chats:
+            if not re.fullmatch(r'-?\d+', chat):
+                problems.append(f'ALLOWED_CHATS: {chat!r} не является числом')
         for extra in settings.extra_peers:
             if not re.fullmatch(r'-?\d+', extra):
                 problems.append(f'EXTRA_PEERS: {extra!r} не является числом')

@@ -154,6 +154,9 @@ def _serve_connection(sock, user, password, mode, conn_number, events, listings=
             if line is None:
                 return
             events.append(('command', line))
+            if mode.get('drop_mid_session') and conn_number == 1 and ' ls ' in line:
+                chan.close()        # шлюз оборвал связь посреди сеанса
+                return
             if not _run_command(line, chan, events, listings, denied, states):
                 return
             chan.send(prompt)

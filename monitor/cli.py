@@ -3,7 +3,7 @@ cli.py - командная строка monitor-hub.
 
   monitor-hub validate            проверить targets.toml и окружение, без сети
   monitor-hub list                показать цели
-  monitor-hub check <цель>        выполнить проверку сейчас (--no-send: не писать в ВК)
+  monitor-hub check <цель>        выполнить проверку сейчас (--no-send: не писать в чат)
   monitor-hub check-paths <цель>  проверить пути цели одним входом (без отчёта)
   monitor-hub tui                 терминальный интерфейс
   monitor-hub run                 демон в терминале (так его запускает systemd)

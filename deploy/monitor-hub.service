@@ -36,6 +36,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true
 LockPersonality=true
+UMask=0077
+CapabilityBoundingSet=
 SystemCallArchitectures=native
 
 [Install]

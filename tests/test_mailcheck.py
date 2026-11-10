@@ -169,3 +169,17 @@ def test_body_text_prefers_plain_and_strips_html():
     only_html = EmailMessage()
     only_html.set_content('<p>hello&nbsp;<b>1</b></p>', subtype='html')
     assert mc.body_text(only_html) == 'hello 1'
+
+
+def test_body_text_nested_multipart_and_base64():
+    import base64
+    import email
+
+    inner = ('Content-Type: multipart/alternative; boundary="in"\r\n\r\n'
+             '--in\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'
+             + base64.b64encode('Device: web-01\nвсё хорошо'.encode()).decode() + '\r\n'
+             '--in\r\nContent-Type: text/html\r\n\r\n<b>html</b>\r\n--in--\r\n')
+    raw = ('Subject: nested\r\nContent-Type: multipart/mixed; boundary="out"\r\n\r\n'
+           '--out\r\n' + inner + '--out\r\nContent-Type: application/octet-stream\r\n\r\nxx\r\n--out--\r\n')
+    text = mc.body_text(email.message_from_string(raw))
+    assert 'Device: web-01' in text and 'всё хорошо' in text and 'html' not in text

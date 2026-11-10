@@ -191,3 +191,15 @@ def test_live_hides_the_password_and_checks_the_command(server_factory, tmp_path
     assert frames and PASSWORD not in frames[0] and '***' in frames[0]
     with pytest.raises(ValueError):
         engine.live(target, 'echo a\nrm -rf /', frames.append, threading.Event())
+
+
+def test_connection_lost_mid_session_is_a_clean_error_and_next_run_recovers(server_factory, tmp_path):
+    """Обрыв после входа не повторяется внутри запуска (это сознательно), но и не зависает:
+    ошибка без секретов, а следующая проверка проходит."""
+    server = server_factory(drop_mid_session=True)
+    engine, target = make(server.port, tmp_path)
+    with pytest.raises(eng.HubError) as exc:
+        engine.fetch_listings(target)
+    assert exc.value.user_message and PASSWORD not in str(exc.value)
+    assert engine.fetch_listings(target)['/srv/crl']
+    assert len([e for e in server.events if e[0] == 'login']) == 2

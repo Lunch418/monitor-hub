@@ -15,4 +15,5 @@ COPY . .
 RUN useradd --create-home app && chown -R app:app /app
 USER app
 
+ENV REQUIRE_SSH=1
 CMD ["python", "-m", "pytest", "-q"]

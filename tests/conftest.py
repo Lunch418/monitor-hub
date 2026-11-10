@@ -129,3 +129,12 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setattr(engine.Engine, 'fetch_listings',
                         lambda self, t, paths=None: dict.fromkeys(paths or t.paths, TUI_LINES))
     return tmp_path
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _ssh_required_in_ci():
+    """REQUIRE_SSH=1 (CI, Docker): без openssh-client тесты падают, а не пропускаются молча."""
+    import os
+    import shutil
+    if os.environ.get('REQUIRE_SSH') == '1' and shutil.which('ssh') is None:
+        pytest.fail('REQUIRE_SSH=1, но openssh-client не установлен: e2e-тесты были бы пропущены')

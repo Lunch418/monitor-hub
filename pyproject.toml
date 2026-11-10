@@ -8,7 +8,7 @@ filterwarnings = ["ignore:This process .* is multi-threaded:DeprecationWarning"]
 
 [tool.coverage.run]
 source = ["monitor"]
-branch = false
+branch = true
 
 [tool.coverage.report]
 fail_under = 85

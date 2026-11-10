@@ -7,8 +7,11 @@ router.py - разбор сообщений беседы: команда -> де
 
 Права: команды принимаются только от ALLOWED_USERS (пустой список - никому), либо
 от всех при явном ALLOW_ANY_USER=1. Отказ получает только тот, кто написал
-настоящую команду: на обычные сообщения бот не отвечает. Если задан ALLOWED_CHATS,
-команды принимаются только из этих бесед (иначе листинг уйдёт в любую, куда добавлен бот).
+настоящую команду: на обычные сообщения бот не отвечает.
+
+Беседы: команды принимаются только из своих (основная, EXTRA_PEERS, peers целей)
+либо из ALLOWED_CHATS, если он задан. Из чужой беседы бот молчит: листинг не должен
+уйти в любую беседу, куда добавлен бот, а бот не должен выдавать, что слушает команды.
 """
 
 from __future__ import annotations
@@ -38,6 +41,16 @@ class Router:
             return True
         return from_id in self.settings.allowed_users
 
+    def chats(self) -> set[str]:
+        """Беседы, откуда принимаются команды: ALLOWED_CHATS, а если он пуст - свои (основная,
+        дополнительные и беседы целей)."""
+        if self.settings.allowed_chats:
+            return set(self.settings.allowed_chats)
+        own = {str(self.settings.default_peer), *self.settings.extra_peers}
+        for target in self.targets.values():
+            own.update(target.peers)
+        return own
+
     def describe(self) -> str:
         lines = []
         for target in self.targets.values():
@@ -61,9 +74,8 @@ class Router:
             return None
         if not self.authorized(from_id):
             return Action('deny', text='Доступ запрещён')
-        chats = self.settings.allowed_chats
-        if chats and peer_id is not None and str(peer_id) not in chats:
-            return Action('deny', text='Из этой беседы команды не принимаются')
+        if peer_id is not None and str(peer_id) not in self.chats():
+            return Action('deny')       # молча: чужая беседа не должна узнать, что бот слушает команды
 
         if word == '/help':
             return Action('reply', text=self.help_text())

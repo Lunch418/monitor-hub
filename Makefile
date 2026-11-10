@@ -29,8 +29,8 @@ docker-test:     ## все проверки в контейнере
 	docker build -q -t monitor-hub:test . >/dev/null
 	docker run --rm monitor-hub:test make check
 
-docker-matrix:   ## все проверки на Python 3.10, 3.11, 3.12 и 3.13
-	@for v in 3.10 3.11 3.12 3.13; do \
+docker-matrix:   ## все проверки на Python 3.11, 3.12 и 3.13
+	@for v in 3.11 3.12 3.13; do \
 	  echo "== Python $$v"; \
 	  docker build -q --build-arg PYTHON_VERSION=$$v -t monitor-hub:py$$v . >/dev/null && \
 	  docker run --rm monitor-hub:py$$v make check | grep -E "passed|failed|error" || exit 1; \

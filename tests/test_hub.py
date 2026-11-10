@@ -47,18 +47,18 @@ def make_hub(tmp_path):
 def test_command_from_chat_runs_target_and_acks(make_hub):
     calls = []
     hub = make_hub(runner=lambda t, peer_id=None, arg="": calls.append((t.name, peer_id)))
-    hub.on_message(55, '7', '/get')
+    hub.on_message(100, '7', '/get')
     for thread in hub.spawned:
         thread.join(timeout=2)
-    assert calls == [('crl', 55)]
-    assert hub.engine.chat.messages == [(55, 'Проверяю: CRL...')]
+    assert calls == [('crl', 100)]
+    assert hub.engine.chat.messages == [(100, 'Проверяю: CRL...')]
 
 
 def test_denied_and_reply(make_hub):
     hub = make_hub()
-    hub.on_message(55, '8', '/get')
-    hub.on_message(55, '7', '/targets')
-    assert hub.engine.chat.messages[0] == (55, 'Доступ запрещён')
+    hub.on_message(100, '8', '/get')
+    hub.on_message(100, '7', '/targets')
+    assert hub.engine.chat.messages[0] == (100, 'Доступ запрещён')
     assert '/get - CRL' in hub.engine.chat.messages[1][1]
 
 
@@ -70,7 +70,7 @@ def test_same_target_is_not_run_twice_at_once(make_hub):
         release.wait(5)
 
     hub = make_hub(runner=slow)
-    first = hub.run_target(hub.targets['crl'], 55)
+    first = hub.run_target(hub.targets['crl'], 100)
     started.wait(2)
     assert hub.run_target(hub.targets['crl'], 56) is None
     assert hub.engine.chat.messages == [(56, 'Подождите, CRL уже проверяется...')]
@@ -190,13 +190,19 @@ def test_gateway_limiter_caps_parallel_logins():
     assert order == ['first', 'second']
 
 
-def test_command_from_foreign_chat_is_denied(make_hub):
+def test_command_from_foreign_chat_is_ignored_silently(make_hub):
     calls = []
-    hub = make_hub(allowed_chats=frozenset({'100'}),
-                   runner=lambda t, peer_id=None, arg="": calls.append(peer_id))
+    hub = make_hub(runner=lambda t, peer_id=None, arg="": calls.append(peer_id))
     hub.on_message(55, '7', '/get')            # разрешённый пользователь, но чужая беседа
-    hub.on_message(55, '7', 'просто текст')
-    assert hub.engine.chat.messages == [(55, 'Из этой беседы команды не принимаются')]
-    assert calls == []
-    hub.on_message(100, '7', '/targets')
+    hub.on_message(55, '7', '/targets')
+    assert hub.engine.chat.messages == [] and calls == []      # молчим: бот не выдаёт себя
+    hub.on_message(100, '7', '/targets')                         # своя беседа (VK_PEER_ID)
     assert '/get - CRL' in hub.engine.chat.messages[-1][1]
+
+
+def test_allowed_chats_overrides_own_chats(make_hub):
+    hub = make_hub(allowed_chats=frozenset({'55'}))
+    hub.on_message(100, '7', '/targets')
+    assert hub.engine.chat.messages == []
+    hub.on_message(55, '7', '/targets')
+    assert hub.engine.chat.messages

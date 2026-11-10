@@ -20,7 +20,7 @@ Everything is configured in a terminal UI or in plain files.
 
 ## Quick start
 
-Python 3.10+ and `openssh-client` are required.
+Python 3.11+ and `openssh-client` are required.
 
 ```
 python3 -m venv venv

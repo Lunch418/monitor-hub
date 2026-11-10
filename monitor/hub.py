@@ -75,7 +75,8 @@ class Hub:
             return
         if action.kind == 'deny':
             self.log.warning('Отказ: команда %r от %s (peer %s)', text.strip()[:40], from_id, peer_id)
-            self.engine.chat.send_message(peer_id, action.text)
+            if action.text:
+                self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'reply':
             self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'run' and action.target is not None:

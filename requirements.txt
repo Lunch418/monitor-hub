@@ -1,7 +1,5 @@
 pexpect>=4.9.0
 schedule>=1.2.0
 requests>=2.31.0
-Pillow>=10.0.0,<13; python_version < "3.11"
-Pillow>=13.0.0; python_version >= "3.11"
+Pillow>=13.0.0
 vk_api>=11.9.9
-tomli>=2.0; python_version < "3.11"

@@ -17,7 +17,7 @@ skip_covered = false
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["venv", ".venv"]
 
 [tool.ruff.lint]
@@ -30,7 +30,7 @@ ignore = [
 "tests/**" = ["E501", "C408", "RUF005", "RUF012", "B017"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 files = ["monitor"]
 

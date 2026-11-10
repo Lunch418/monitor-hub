@@ -13,7 +13,7 @@ load_targets: разбор и проверка файла. Ошибки не б�
 from __future__ import annotations
 
 import re
-import sys
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,11 +23,6 @@ from monitor import mailcheck
 from monitor.app import SAFE_HOST_RE, SAFE_PATH_RE, SAFE_USER_RE, SEND_TIME_RE, state_dir
 from monitor.common import _env, _env_bool, _env_float, _env_int, _env_list
 from monitor.messengers import NAMES
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - ветка зависит от версии Python
-    import tomli as tomllib
 
 STYLES = ('listing', 'backups', 'backups-sizes')
 TYPES = ('ls', 'mail')       # ls - каталоги по ssh, mail - письма о бэкапах по IMAP

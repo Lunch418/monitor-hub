@@ -26,8 +26,17 @@ StandardError=journal
 # Монитору не нужны привилегии и общий /tmp
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=full
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

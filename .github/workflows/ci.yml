@@ -30,5 +30,7 @@ jobs:
         run: mypy
       - name: Security (bandit)
         run: bandit -q -c pyproject.toml -r monitor
+      - name: Dependencies audit (pip-audit)
+        run: pip install pip-audit && pip-audit -r requirements.txt -r requirements-tui.txt
       - name: Tests (coverage must stay above 85%)
         run: pytest -q --cov

@@ -203,3 +203,15 @@ def test_connection_lost_mid_session_is_a_clean_error_and_next_run_recovers(serv
     assert exc.value.user_message and PASSWORD not in str(exc.value)
     assert engine.fetch_listings(target)['/srv/crl']
     assert len([e for e in server.events if e[0] == 'login']) == 2
+
+
+def test_file_named_like_a_marker_does_not_truncate_listing(server_factory, tmp_path):
+    """Имя файла в проверяемой папке не должно обрезать отчёт: маркеры случайные."""
+    text = ('total 8\r\n'
+            '-rw-r--r--  1 root root 1 Oct 19 06:54 __HUB0_END__\r\n'
+            '-rw-r--r--  1 root root 2 Oct 19 06:55 __HUB0_BEG__\r\n'
+            '-rw-r--r--  1 root root 3 Oct 19 06:56 after-marker.crl\r\n')
+    server = server_factory(listings={'/srv/crl': text})
+    engine, target = make(server.port, tmp_path)
+    lines = engine.fetch_listings(target)['/srv/crl']
+    assert any('after-marker.crl' in line for line in lines)

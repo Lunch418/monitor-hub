@@ -11,6 +11,7 @@ from __future__ import annotations
 import imaplib
 import os
 import re
+import secrets
 import shlex
 import threading
 import time
@@ -109,6 +110,11 @@ STYLES: dict[str, Style] = {
 
 # Команда ls
 
+def _tag(idx: int) -> str:
+    """Номер задания плюс случайная часть: имя файла в проверяемой папке не может подделать маркер."""
+    return f'{idx}x{secrets.token_hex(6)}'
+
+
 def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
     """(маркер_начала, маркер_конца, команда) для одного пути.
 
@@ -120,14 +126,14 @@ def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
     (сразу 'a password is required'), `env LANG=C` вместо `sudo LANG=C`, потому
     что sudo с env_reset отказывается проставлять переменные; sudo применяется
     ровно к одному `ls -la`."""
-    begin = f'__HUB{idx}_BEG__'
-    end = f'__HUB{idx}_END__'
+    tag = _tag(idx)
+    begin, end = f'__HUB{tag}_BEG__', f'__HUB{tag}_END__'
     quoted = shlex.quote(path)
     listing = f'sudo -n env LANG=C LC_ALL=C ls -la {quoted}' if sudo else f'LANG=C ls -la {quoted}'
     command = (
-        f"printf '__HUB%s__\\n' {idx}_BEG; "
+        f"printf '__HUB%s__\\n' {tag}_BEG; "
         f'{listing}; '
-        f"printf '__HUB%s__\\n' {idx}_END"
+        f"printf '__HUB%s__\\n' {tag}_END"
     )
     return begin, end, command
 
@@ -172,9 +178,9 @@ def clean_frame(raw: bytes, limit: int = LIVE_MAX_LINES) -> str:
 
 def exec_command(idx: int, command: str) -> tuple[str, str, str]:
     """(маркер_начала, маркер_конца, команда): как ls_command, но для любой команды."""
-    begin = f'__HUB{idx}_BEG__'
-    end = f'__HUB{idx}_END__'
-    full = f"printf '__HUB%s__\\n' {idx}_BEG; {command}; printf '__HUB%s__\\n' {idx}_END"
+    tag = _tag(idx)
+    begin, end = f'__HUB{tag}_BEG__', f'__HUB{tag}_END__'
+    full = f"printf '__HUB%s__\\n' {tag}_BEG; {command}; printf '__HUB%s__\\n' {tag}_END"
     return begin, end, full
 
 

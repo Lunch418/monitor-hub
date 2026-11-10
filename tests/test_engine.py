@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 
 import pytest
 from PIL import Image
@@ -33,7 +34,7 @@ def engine(tmp_path):
 
 def test_ls_command_markers_are_not_in_typed_text():
     begin, end, command = eng.ls_command(0, '/a b/c')
-    assert begin == '__HUB0_BEG__' and end == '__HUB0_END__'
+    assert re.fullmatch(r'__HUB0x[0-9a-f]{12}_BEG__', begin) and end == begin.replace('_BEG__', '_END__')
     assert begin not in command and end not in command
     assert "'/a b/c'" in command and 'sudo' not in command
 
@@ -154,5 +155,10 @@ def test_clean_frame_strips_terminal_control_and_limits_lines():
 
 def test_exec_command_markers_are_built_remotely():
     begin, end, full = eng.exec_command(3, 'uptime')
-    assert begin == '__HUB3_BEG__' and end == '__HUB3_END__'
+    assert re.fullmatch(r'__HUB3x[0-9a-f]{12}_BEG__', begin) and end == begin.replace('_BEG__', '_END__')
     assert begin not in full and end not in full                    # в набранной команде маркеров нет
+
+
+def test_markers_are_random_per_call():
+    assert eng.ls_command(0, '/a')[0] != eng.ls_command(0, '/a')[0]
+    assert eng.exec_command(1, 'x')[1] != eng.exec_command(1, 'x')[1]

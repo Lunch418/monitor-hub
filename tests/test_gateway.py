@@ -215,3 +215,40 @@ def test_file_named_like_a_marker_does_not_truncate_listing(server_factory, tmp_
     engine, target = make(server.port, tmp_path)
     lines = engine.fetch_listings(target)['/srv/crl']
     assert any('after-marker.crl' in line for line in lines)
+
+
+def test_chat_command_runs_on_machine_through_real_ssh(server_factory, tmp_path):
+    """/top из беседы -> один вход, команда из белого списка, ответ без служебных маркеров."""
+    import time
+
+    from monitor.hub import Hub
+    server = server_factory()
+    engine, target = make(server.port, tmp_path, info=('top',), commands=(('hello', "echo 'hi there'"),))
+    sent = []
+
+    class Chat:
+        def send_message(self, peer, text):
+            sent.append((peer, text))
+
+        def secrets(self):
+            return []
+
+    engine.chat = Chat()
+    settings = type(engine.settings)(**{**engine.settings.__dict__, 'allowed_users': frozenset({'7'})})
+    hub = Hub(engine, {'gw': target}, settings, logging.getLogger('gw'))
+
+    def ask(text, answers_expected):
+        hub.on_message(1, '7', text)
+        for _ in range(100):
+            if len([t for _, t in sent if t.startswith('[GW]')]) >= answers_expected:
+                break
+            time.sleep(0.1)
+
+    ask('/top', 1)
+    ask('/hello gw', 2)
+    texts = [text for _, text in sent]
+    assert 'Запрашиваю: /top...' in texts and 'Запрашиваю: /hello...' in texts
+    answers = [t for t in texts if t.startswith('[GW]')]
+    assert any('load average' in t and '__HUB' not in t for t in answers)
+    assert '[GW] /hello\nhi there' in answers
+    assert len([e for e in server.events if e[0] == 'login']) == 2          # по одному входу на запрос

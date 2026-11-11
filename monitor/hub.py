@@ -13,12 +13,15 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 
+from monitor import mailcheck
 from monitor.config import Settings, Target
-from monitor.engine import Engine
+from monitor.engine import Engine, info_command
 from monitor.router import Router
 from monitor.scheduler import build_scheduler, next_runs
 
 TICK_SECONDS = 5
+INFO_CACHE_SECONDS = 15        # повторный /uptime в эти секунды берётся из памяти: шлюз старый, входы дороги
+INFO_WAIT_SECONDS = 180        # дольше не ждём ни одну машину: остальные ответы не должны ждать зависшую
 
 
 class Hub:
@@ -30,6 +33,9 @@ class Hub:
         self.log = log
         self.router = Router(self.targets, settings)
         self.locks = {name: threading.Lock() for name in self.targets}
+        self.info_locks = {name: threading.Lock() for name in self.targets}
+        self.info_cache: dict[tuple[str, str], tuple[float, str]] = {}
+        self._clock = time.monotonic
         self.scheduler = build_scheduler(self.targets, self.fire_scheduled)
         self._spawn = spawn or _start_thread
 
@@ -64,6 +70,44 @@ class Hub:
             peer, f'Проверка "{target.title}" идёт дольше {target.run_timeout // 60} мин. '
                   'Результат придёт, когда она завершится.')
 
+    # состояние машин: /uptime, /disk и подобные
+    def run_info(self, word: str, targets: tuple[Target, ...], peer_id: int) -> None:
+        """Ответ беседе: по блоку на каждую цель, в порядке конфигурации. Каждая цель идёт в своём
+        потоке (число одновременных входов на шлюз ограничено Engine.gateway); зависшая не задерживает
+        ответ дольше INFO_WAIT_SECONDS."""
+        results: dict[str, str] = {}
+        threads = [self._spawn(self._info_one, word, t, results) for t in targets]
+        deadline = self._clock() + INFO_WAIT_SECONDS
+        for thread in threads:
+            thread.join(max(0.0, deadline - self._clock()))
+        blocks = [f'[{t.title}] /{word}\n{results.get(t.name, "нет ответа: машина не ответила вовремя")}'
+                  for t in targets]
+        for part in mailcheck.split_message('\n\n'.join(blocks)):
+            self.engine.chat.send_message(peer_id, part)
+
+    def _info_one(self, word: str, target: Target, results: dict[str, str]) -> None:
+        key = (target.name, word)
+        lock = self.info_locks[target.name]
+        if not lock.acquire(blocking=False):
+            results[target.name] = 'уже запрашивается, подождите'
+            return
+        try:
+            cached = self.info_cache.get(key)
+            if cached and self._clock() - cached[0] < INFO_CACHE_SECONDS:
+                results[target.name] = f'{cached[1]}\n(данные {int(self._clock() - cached[0])} с назад)'
+                return
+            try:
+                text = self.engine.run_command(target, info_command(target, word)) or '(пустой вывод)'
+            except Exception as exc:
+                self.log.error('[%s] /%s: %s', target.name, word, self.engine.mask(str(exc), target),
+                               exc_info=True)
+                results[target.name] = f'ошибка: {self.engine.user_facing(exc)}'
+                return
+            self.info_cache[key] = (self._clock(), text)
+            results[target.name] = text
+        finally:
+            lock.release()
+
     def fire_scheduled(self, target: Target) -> None:
         self.log.info('[%s] запуск по расписанию', target.name)
         self.run_target(target)
@@ -79,6 +123,11 @@ class Hub:
                 self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'reply':
             self.engine.chat.send_message(peer_id, action.text)
+        elif action.kind == 'info' and action.targets:
+            self.log.info('/%s %s от %s (peer %s)', action.text, ','.join(t.name for t in action.targets),
+                          from_id, peer_id)
+            self.engine.chat.send_message(peer_id, f'Запрашиваю: /{action.text}...')
+            self._spawn(self.run_info, action.text, action.targets, peer_id)
         elif action.kind == 'run' and action.target is not None:
             self.log.info('[%s] команда от %s (peer %s)', action.target.name, from_id, peer_id)
             if self.run_target(action.target, peer_id, action.arg) is not None:
@@ -93,7 +142,8 @@ class Hub:
 
         def startup() -> None:
             who = 'все' if self.settings.allow_any_user else ', '.join(sorted(self.settings.allowed_users))
-            commands = [*sorted(self.router.by_command), '/targets', '/run', '/help']
+            commands = [*sorted(self.router.by_command), *(f'/{w}' for w in self.router.info_words()),
+                        '/targets', '/run', '/help']
             self.log.info('%s: приём команд запущен. Команды: %s. Пользователи: %s',
                           self.engine.chat.label, ' '.join(commands), who)
 

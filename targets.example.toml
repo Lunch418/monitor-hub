@@ -11,6 +11,8 @@ run_timeout = 900         # дольше - предупреждение в бе�
 style = "backups"         # listing | backups | backups-sizes
 
 # 1. Папки на машине через PAM-шлюз (шлюз общий, PAM_HOST в .env).
+# info - какие слова состояния машины можно спрашивать в беседе (/uptime, /disk, /mem, /top, /cpu, /net);
+# по умолчанию не разрешено ничего. [targets.example.commands] ниже - свои слова.
 [targets.example]
 title = "Example"
 pam_user = "monitor"
@@ -20,6 +22,10 @@ target_sel = 1
 paths = ["/var/example/reports"]
 schedule = "daily 09:00"
 command = "/example"
+info = ["uptime", "disk"]
+
+[targets.example.commands]
+nginx = "pgrep -c nginx"              # /nginx в беседе покажет число процессов
 
 # 2. Папки на машине напрямую по ssh, без PAM (логин и пароль).
 [targets.direct]

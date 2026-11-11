@@ -558,6 +558,8 @@ class HubApp(App):
         existing = self.targets.get(self.current or '')
         password_env = existing.password_env if existing else default_password_env(name, kind, via)
         raw, problems = raw_from_values(values, kind=kind, via=via, password_env=password_env)
+        if existing is not None and existing.commands and kind == 'ls':
+            raw['commands'] = dict(existing.commands)       # своих команд в форме нет: не терять при сохранении
         others = {n: target_to_dict(t, self.defaults) for n, t in self.targets.items() if n != self.current}
         if not self.current and name in others:
             return None, [f'цель {name} уже есть'], ''

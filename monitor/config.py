@@ -23,15 +23,17 @@ from monitor import mailcheck
 from monitor.app import SAFE_HOST_RE, SAFE_PATH_RE, SAFE_USER_RE, SEND_TIME_RE, state_dir
 from monitor.common import _env, _env_bool, _env_float, _env_int, _env_list
 from monitor.messengers import NAMES
+from monitor.presets import BUILTIN_WORDS, CHAT_WORDS, LIVE_MAX_COMMAND
 
 STYLES = ('listing', 'backups', 'backups-sizes')
 TYPES = ('ls', 'mail')       # ls - каталоги по ssh, mail - письма о бэкапах по IMAP
 VIAS = ('pam', 'ssh')        # как заходить на ВМ: через PAM-шлюз или напрямую
 WEEKDAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
-RESERVED_COMMANDS = ('/targets', '/run', '/help')
+RESERVED_COMMANDS = tuple(f'/{word}' for word in BUILTIN_WORDS)
 
 _NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
 _COMMAND_RE = re.compile(r'^/[a-z0-9_]{1,32}$')
+_WORD_RE = re.compile(r'^[a-z0-9_]{1,32}$')
 _ENV_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _IMAP_USER_RE = re.compile(r'^[^\s"\\\x00-\x1f]{1,128}$')
 _MAIL_FROM_RE = re.compile(r'^[^"\\\x00-\x1f]{0,128}$')
@@ -63,6 +65,7 @@ _COMMON_KEYS = {'type', 'title', 'password_env', 'schedule', 'command', 'peers',
 _LS_KEYS = {
     'via', 'pam_user', 'user', 'target_host', 'target_sel', 'ssh_port', 'pam_host', 'pam_port',
     'paths', 'style', 'sudo', 'stale_days', 'prompt_timeout', 'connect_retries', 'connect_retry_delay',
+    'info', 'commands',
 }
 _MAIL_KEYS = {
     'imap_host', 'imap_port', 'imap_user', 'imap_ssl', 'mail_from', 'folders', 'night_from',
@@ -71,7 +74,8 @@ _MAIL_KEYS = {
 _TARGET_KEYS = _COMMON_KEYS | _LS_KEYS | _MAIL_KEYS
 # Эти поля у каждой цели свои и в [defaults] не допускаются.
 _IDENTITY_KEYS = ('type', 'title', 'command', 'password_env', 'pam_user', 'user', 'target_host', 'paths',
-                  'peers', 'schedule', 'imap_user', 'expect', 'mail_from', 'subject_re')
+                  'peers', 'schedule', 'imap_user', 'expect', 'mail_from', 'subject_re', 'commands')
+_TABLE_KEYS = ('expect', 'commands')      # в targets.toml это отдельные разделы [targets.<имя>.expect]
 _VIA_PAM_ONLY = ('pam_user', 'target_sel', 'pam_host', 'pam_port')
 _VIA_SSH_ONLY = ('user', 'ssh_port')
 
@@ -121,6 +125,8 @@ class Target:
     schedule: tuple[Schedule, ...] = ()
     command: str = ''
     sudo: bool = False
+    info: tuple[str, ...] = ()                       # какие команды состояния разрешены из беседы (/uptime, /disk...)
+    commands: tuple[tuple[str, str], ...] = ()       # свои именованные команды: (слово, команда на машине)
     peers: tuple[str, ...] = ()
     style: str = 'backups'
     stale_days: int = 0
@@ -352,11 +358,42 @@ def _ls_fields(where: str, merged: Mapping[str, object], via: str, text, problem
         problems.append(f'{where} sudo: нужно true или false, получено {sudo!r}')
         sudo = False
     out['sudo'] = sudo
+    out['info'], out['commands'] = _info_fields(where, merged, problems)
     out['stale_days'] = _as_int(merged.get('stale_days'), f'{where} stale_days', problems)
     out['prompt_timeout'] = _as_int(merged.get('prompt_timeout'), f'{where} prompt_timeout', problems, 30)
     out['connect_retries'] = _as_int(merged.get('connect_retries'), f'{where} connect_retries', problems, 1)
     out['connect_retry_delay'] = _as_int(merged.get('connect_retry_delay'), f'{where} connect_retry_delay', problems)
     return out
+
+
+def _info_fields(where: str, merged: Mapping[str, object], problems: list[str]
+                 ) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """info - слова беседы (/uptime, /disk...), которые разрешены для цели; commands - свои слова."""
+    info: list[str] = []
+    for word in _as_str_list(merged.get('info', []), f'{where} info', problems):
+        word = word.lower().lstrip('/')
+        if word not in CHAT_WORDS:
+            problems.append(f'{where} info: неизвестное слово {word!r}, допустимо {", ".join(CHAT_WORDS)}')
+        elif word not in info:
+            info.append(word)
+
+    raw = merged.get('commands') or {}
+    pairs: list[tuple[str, str]] = []
+    if not isinstance(raw, dict):
+        problems.append(f'{where} commands: нужна таблица "слово = команда на машине"')
+        raw = {}
+    for word, command in raw.items():
+        word = str(word)
+        if not _WORD_RE.match(word):
+            problems.append(f'{where} commands: слово {word!r} - латиница, цифры и _ (до 32 символов)')
+        elif f'/{word}' in RESERVED_COMMANDS:
+            problems.append(f'{where} commands: слово /{word} зарезервировано')
+        if (not isinstance(command, str) or not command.strip() or len(command) > LIVE_MAX_COMMAND
+                or any(ord(ch) < 32 for ch in command)):
+            problems.append(f'{where} commands.{word}: одна строка, не длиннее {LIVE_MAX_COMMAND} символов')
+            continue
+        pairs.append((word, command.strip()))
+    return tuple(info), tuple(pairs)
 
 
 def _mail_fields(where: str, merged: Mapping[str, object], text, problems: list[str]) -> dict[str, Any]:
@@ -455,6 +492,11 @@ def parse_targets(data: Mapping[str, object]) -> tuple[dict[str, Target], list[s
             if target.command in seen:
                 problems.append(f'команда {target.command} задана у целей {seen[target.command]} и {target.name}')
             seen[target.command] = target.name
+    for target in targets.values():
+        for word, _ in target.commands:
+            owner = seen.get(f'/{word}')
+            if owner:
+                problems.append(f'[targets.{target.name}] commands: /{word} уже занята командой цели {owner}')
     return targets, problems
 
 
@@ -534,7 +576,8 @@ _FIELD_ORDER = (
     'type', 'title', 'via', 'pam_user', 'user', 'password_env', 'target_host', 'target_sel', 'ssh_port',
     'pam_host', 'pam_port', 'paths', 'style', 'sudo', 'stale_days', 'imap_host', 'imap_port', 'imap_user',
     'imap_ssl', 'mail_from', 'folders', 'night_from', 'night_to', 'subject_re', 'ok_words', 'fail_words',
-    'schedule', 'command', 'peers', 'prompt_timeout', 'connect_retries', 'connect_retry_delay', 'run_timeout',
+    'schedule', 'command', 'info', 'peers', 'prompt_timeout', 'connect_retries', 'connect_retry_delay',
+    'run_timeout',
 )
 
 
@@ -567,7 +610,7 @@ def target_to_dict(target: Target, defaults: Mapping[str, object] | None = None)
         'imap_user': target.imap_user, 'imap_ssl': target.imap_ssl, 'mail_from': target.mail_from,
         'folders': list(target.folders), 'night_from': target.night_from, 'night_to': target.night_to,
         'subject_re': target.subject_re, 'ok_words': list(target.ok_words), 'fail_words': list(target.fail_words),
-        'schedule': [str(s) for s in target.schedule], 'command': target.command,
+        'schedule': [str(s) for s in target.schedule], 'command': target.command, 'info': list(target.info),
         'peers': list(target.peers), 'prompt_timeout': target.prompt_timeout,
         'connect_retries': target.connect_retries, 'connect_retry_delay': target.connect_retry_delay,
         'run_timeout': target.run_timeout,
@@ -593,6 +636,11 @@ def target_to_dict(target: Target, defaults: Mapping[str, object] | None = None)
         if key == 'schedule' and isinstance(value, list) and len(value) == 1:
             value = value[0]
         out[key] = value
+    # таблицы: в файл пишутся отдельными разделами (dump_targets), но копия цели без них не разбирается
+    if target.expect:
+        out['expect'] = dict(target.expect)
+    if target.commands:
+        out['commands'] = dict(target.commands)
     return out
 
 
@@ -604,11 +652,16 @@ def dump_targets(targets: Mapping[str, Target], defaults: Mapping[str, object] |
         lines.append('')
     for target in targets.values():
         lines.append(f'[targets.{target.name}]')
-        lines += [f'{k} = {_toml_value(v)}' for k, v in target_to_dict(target, defaults).items()]
+        lines += [f'{k} = {_toml_value(v)}' for k, v in target_to_dict(target, defaults).items()
+                  if k not in _TABLE_KEYS]
         lines.append('')
         if target.expect:
             lines.append(f'[targets.{target.name}.expect]')
             lines += [f'{_toml_key(vm)} = {_toml_value(rule)}' for vm, rule in target.expect]
+            lines.append('')
+        if target.commands:
+            lines.append(f'[targets.{target.name}.commands]')
+            lines += [f'{_toml_key(word)} = {_toml_value(cmd)}' for word, cmd in target.commands]
             lines.append('')
     return '\n'.join(lines)
 

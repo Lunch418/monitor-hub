@@ -27,6 +27,7 @@ from monitor import mailcheck, runlog
 from monitor import pam_session as _pam
 from monitor.config import Settings, Target
 from monitor.messengers import make_messenger
+from monitor.presets import CHAT_WORDS, LIVE_MAX_COMMAND, LIVE_PRESETS
 
 
 class HubError(_app.MonitorError):
@@ -141,15 +142,7 @@ def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
 # Живой просмотр: команда повторяется в одном сеансе, каждый раз выводится свежий кадр.
 # Настоящий htop рисует экран терминала, поэтому берём пакетные аналоги (top -b и т.п.).
 
-LIVE_PRESETS = {
-    'top': ('top -b -n 1 -w 160 | head -n 30', 'нагрузка и самые прожорливые процессы'),
-    'cpu': ('ps -eo pid,user,pcpu,pmem,etime,comm --sort=-pcpu | head -n 15', 'процессы по CPU'),
-    'mem': ('free -h; echo; ps -eo pid,user,pmem,rss,comm --sort=-pmem | head -n 12', 'память и процессы по ней'),
-    'df': ('df -hT -x tmpfs -x devtmpfs -x squashfs', 'свободное место на дисках'),
-    'net': ('ss -s; echo; ss -tn state established | head -n 15', 'сетевые соединения'),
-    'uptime': ('uptime; echo; w -h | head -n 15', 'аптайм и кто вошёл'),
-}
-LIVE_MAX_COMMAND = 300
+
 LIVE_MAX_LINES = 200
 _ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07')
 
@@ -164,6 +157,17 @@ def live_command(text: str) -> str:
     if len(text) > LIVE_MAX_COMMAND or any(ord(ch) < 32 for ch in text):
         raise ValueError(f'команда: одна строка, не длиннее {LIVE_MAX_COMMAND} символов')
     return text
+
+
+def info_command(target: Target, word: str) -> str:
+    """Слово из беседы (/uptime, /disk или своё из commands) -> команда для машины цели.
+    ValueError, если для этой цели слово не разрешено: произвольный текст из беседы не выполняется."""
+    custom = dict(target.commands)
+    if word in custom:
+        return custom[word]
+    if word in target.info and word in CHAT_WORDS:
+        return LIVE_PRESETS[CHAT_WORDS[word]][0]
+    raise ValueError(f'для цели {target.name} /{word} не разрешено')
 
 
 def clean_frame(raw: bytes, limit: int = LIVE_MAX_LINES) -> str:
@@ -422,6 +426,19 @@ class Engine:
                     self.settings, {target.name: target}, self.env, need_chat=False),
                 config_error_cls=ConfigError,
             )
+
+    def run_command(self, target: Target, command: str) -> str:
+        """Один раз выполняет команду на машине (тем же сеансом, что и live) и возвращает вывод:
+        без управляющих последовательностей, секреты закрыты."""
+        stop = threading.Event()
+        frames: list[str] = []
+
+        def on_frame(text: str) -> None:
+            frames.append(text)
+            stop.set()
+
+        self.live(target, command, on_frame, stop)
+        return frames[0] if frames else ''
 
     def check_paths(self, target: Target, paths: tuple[str, ...] | None = None) -> list[PathVerdict]:
         """Один вход на ВМ: для каждого пути - существует ли, папка ли, можно ли читать."""

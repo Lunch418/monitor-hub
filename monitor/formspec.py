@@ -63,6 +63,7 @@ FIELDS: tuple[Field, ...] = (
     Field('fail_words', 'слова сбоя', 'через запятую; пусто - стандартные', MAIL),
     Field('schedule', 'время', 'daily 09:00, wed 10:00'),
     Field('command', 'команда', '/get'),
+    Field('info', 'состояние', 'в беседе: uptime, disk, mem, top, cpu, net', LS),
     Field('peers', 'кому', 'id беседы через запятую; пусто - по умолчанию'),
     Field('prompt_timeout', 'ждать shell', 'секунд, по умолчанию 120', LS, number=True),
     Field('connect_retries', 'попыток', 'по умолчанию 2', LS, number=True),
@@ -70,7 +71,7 @@ FIELDS: tuple[Field, ...] = (
     Field('run_timeout', 'лимит, с', 'до предупреждения в беседе, по умолчанию 900', number=True),
 )
 FIELD_BY_ID = {f.id: f for f in FIELDS}
-LIST_FIELDS = ('paths', 'folders', 'schedule', 'peers', 'ok_words', 'fail_words')
+LIST_FIELDS = ('paths', 'folders', 'schedule', 'peers', 'ok_words', 'fail_words', 'info')
 
 
 def visible(field: Field, kind: str, via: str) -> bool:
@@ -121,6 +122,7 @@ def values_from_target(target: Target) -> dict[str, str]:
         'expect': format_expect(target.expect), 'subject_re': target.subject_re,
         'ok_words': ', '.join(target.ok_words), 'fail_words': ', '.join(target.fail_words),
         'schedule': ', '.join(str(s) for s in target.schedule), 'command': target.command,
+        'info': ', '.join(target.info),
         'peers': ', '.join(target.peers), 'prompt_timeout': str(target.prompt_timeout),
         'connect_retries': str(target.connect_retries), 'connect_retry_delay': str(target.connect_retry_delay),
         'run_timeout': str(target.run_timeout),

@@ -15,6 +15,7 @@ Everything is configured in a terminal UI or in plain files.
 - Mail targets: IMAP, expected machines by weekday (`mon`, `daily`, `sun#1`), night window, status from the subject.
 - Messengers: VK or Telegram (`MESSENGER` in `.env`), per-target recipients.
 - Chat commands: per-target `/get`, `/pg`, ..., plus `/run <target>`, `/targets`, `/help`; allowed users only.
+- Machine state from chat: `/uptime`, `/disk`, `/mem`, `/top`, `/cpu`, `/net` (one target or all), enabled per target with `info = [...]`; your own words in `[targets.<name>.commands]`. Only these run, never free text from chat; repeats within 15 s come from memory.
 - TUI: targets, full editor, preview, log, urgent folder view (`/ls`), live view (`/live top`).
 - Reliability: timeouts, per-target threads and locks, watchdog message, gateway login limiter.
 

@@ -324,3 +324,24 @@ def test_live_rejects_bad_command_and_mail_target(project):
             await pilot.pause()
             assert '/live работает для целей типа ls' in log_text(app)
     run(scenario())
+
+
+def test_saving_in_form_keeps_custom_commands_and_sets_info(project):
+    toml = project / 'targets.toml'
+    toml.write_text(toml.read_text(encoding='utf-8') + '\n[targets.crl.commands]\nnginx = "pgrep -c nginx"\n',
+                    encoding='utf-8')
+
+    async def scenario():
+        app = make_app(project)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            await type_into(pilot, app, '#prompt-input', '/set info uptime, disk')
+            await pilot.press('enter')
+            await type_into(pilot, app, '#prompt-input', '/save')
+            await pilot.press('enter')
+            await pilot.pause()
+            targets, problems = load_targets(toml)
+            assert problems == []
+            assert targets['crl'].info == ('uptime', 'disk')
+            assert targets['crl'].commands == (('nginx', 'pgrep -c nginx'),)      # форма их не показывает, но не теряет
+    run(scenario())

@@ -10,3 +10,6 @@ venv/
 .hypothesis/
 .coverage
 htmlcov/
+*.bak
+.env.*
+!.env.example

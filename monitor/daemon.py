@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import signal
 import sys
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -86,25 +85,6 @@ class Daemon:
         signal.signal(signal.SIGTERM, _terminate)
         signal.signal(signal.SIGINT, _terminate)
 
-    # Планировщик
-    def scheduler_loop(self, *, run_job: Callable, bot_polling: Callable,
-                       send_time: str, when_text: str,
-                       weekday: str | None = None) -> None:
-        """weekday=None - каждый день, иначе имя дня ('monday', 'wednesday')."""
-        import schedule
-        log = self.log
-        self.install_signal_handlers()
-        log.info('Планировщик: отправка %s в %s', when_text, send_time)
-        getattr(schedule.every(), weekday or 'day').at(send_time).do(run_job)
-        threading.Thread(target=bot_polling, daemon=True).start()
-        while True:
-            try:
-                schedule.run_pending()
-            except Exception as exc:
-                log.error('Ошибка в планировщике: %s', exc, exc_info=True)
-            time.sleep(30)
-
-    # Команды
     def start(self, *, preflight: Callable[[], bool], scheduler_loop: Callable,
               detach_console_logging: Callable, started_lines: Callable[[int | None], list[str]]) -> None:
         """started_lines(pid) - строки, которые родитель печатает после успешного запуска."""

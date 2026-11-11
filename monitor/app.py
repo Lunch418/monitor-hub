@@ -6,6 +6,7 @@ app.py - общий каркас: .env, каталог состояния, ло�
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import os
@@ -121,7 +122,10 @@ def mask_secrets(text: str, secrets: Iterable[str]) -> str:
     """Пароль PAM и токен ВК не должны попадать ни в лог, ни в сообщение."""
     for secret in secrets:
         if secret and len(secret) >= 4:
-            text = text.replace(secret, '***')
+            # repr() байтов и строк экранирует кириллицу и обратную косую: прячем и такие записи
+            forms = {secret, repr(secret.encode())[2:-1], repr(secret)[1:-1], json.dumps(secret)[1:-1]}
+            for form in sorted(forms, key=len, reverse=True):
+                text = text.replace(form, '***')
     return text
 
 
@@ -149,8 +153,8 @@ def user_facing(exc: BaseException, error_cls: type[MonitorError], default_messa
 
 
 # Проверка конфигурации
-SAFE_HOST_RE = re.compile(r'^[A-Za-z0-9._-]+$')
-SAFE_USER_RE = re.compile(r'^[A-Za-z0-9._@-]+$')
+SAFE_HOST_RE = re.compile(r'^[A-Za-z0-9._][A-Za-z0-9._-]*$')     # не с '-': ssh принял бы за опцию
+SAFE_USER_RE = re.compile(r'^[A-Za-z0-9._@][A-Za-z0-9._@-]*$')
 SAFE_PATH_RE = re.compile(r'^[A-Za-z0-9 _./~-]+$')
 SEND_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
 
@@ -196,7 +200,7 @@ def run_check(*, log, title: str, error_title: str, target_peer_id: int | None,
         try:
             send_photos(saved, caption, peer)
         except Exception as exc:
-            log.error('Не удалось отправить фото в ВК: %s', exc)
+            log.error('Не удалось отправить фото: %s', exc)
             send_message(peer, user_facing(exc))
 
         if target_peer_id is None:

@@ -13,11 +13,14 @@ import re
 import time
 from collections.abc import Callable
 
+from monitor.mailcheck import split_message
+
 TEXT_LIMIT = 4096
 CAPTION_LIMIT = 1024
 SEND_DELAYS = (2, 5, 10, 20)
 FATAL_CODES = (401, 404)          # неверный токен
 _BOT_SUFFIX_RE = re.compile(r'^(/\w+)@\w+')
+STALE_SECONDS = 300      # дольше - команда считается устаревшей
 
 
 class TelegramApiError(Exception):
@@ -30,21 +33,7 @@ class TelegramApiError(Exception):
 
 def split_text(text: str, limit: int = TEXT_LIMIT) -> list[str]:
     """Режет по строкам, чтобы уложиться в лимит сообщения."""
-    if len(text) <= limit:
-        return [text]
-    parts: list[str] = []
-    current = ''
-    for line in text.split('\n'):
-        if len(current) + len(line) + 1 > limit and current:
-            parts.append(current)
-            current = ''
-        current = f'{current}\n{line}' if current else line
-        while len(current) > limit:
-            parts.append(current[:limit])
-            current = current[limit:]
-    if current:
-        parts.append(current)
-    return parts
+    return split_message(text, limit)
 
 
 class TelegramMessenger:
@@ -173,6 +162,13 @@ class TelegramMessenger:
         text = _BOT_SUFFIX_RE.sub(r'\1', str(message['text']))
         return int(message['chat']['id']), str((message.get('from') or {}).get('id', '')), text
 
+    @staticmethod
+    def is_stale(update: dict, now: float | None = None) -> bool:
+        """Сообщение старше STALE_SECONDS (сеть пропадала): команда уже неактуальна, не выполняем."""
+        message = update.get('message')
+        date = message.get('date') if isinstance(message, dict) else None
+        return isinstance(date, int) and (now if now is not None else time.time()) - date > STALE_SECONDS
+
     def poll(self, on_message: Callable[[int, str, str], None], startup: Callable[[], None]) -> None:
         if not self.token:
             self.log.warning('TELEGRAM_TOKEN не задан - приём команд отключён')
@@ -199,7 +195,9 @@ class TelegramMessenger:
                 for update in updates if isinstance(updates, list) else []:
                     offset = int(update['update_id']) + 1
                     parsed = self.parse_update(update)
-                    if parsed:
+                    if parsed and self.is_stale(update):
+                        self.log.warning('Telegram: пропущена устаревшая команда %r', parsed[2][:40])
+                    elif parsed:
                         on_message(*parsed)
             except Exception as exc:
                 if self.is_fatal(exc):

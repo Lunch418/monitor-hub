@@ -54,6 +54,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     'ssh_port': 22,
     'imap_port': 993,
     'imap_ssl': True,
+    'imap_verify': True,
     'folders': ['INBOX'],
     'night_from': 18,
     'night_to': 12,
@@ -68,7 +69,7 @@ _LS_KEYS = {
     'info', 'commands',
 }
 _MAIL_KEYS = {
-    'imap_host', 'imap_port', 'imap_user', 'imap_ssl', 'mail_from', 'folders', 'night_from',
+    'imap_host', 'imap_port', 'imap_user', 'imap_ssl', 'imap_verify', 'mail_from', 'folders', 'night_from',
     'night_to', 'expect', 'subject_re', 'ok_words', 'fail_words',
 }
 _TARGET_KEYS = _COMMON_KEYS | _LS_KEYS | _MAIL_KEYS
@@ -113,6 +114,7 @@ class Target:
     imap_port: int = 993
     imap_user: str = ''
     imap_ssl: bool = True
+    imap_verify: bool = True     # проверять сертификат IMAP-сервера
     mail_from: str = ''
     folders: tuple[str, ...] = ('INBOX',)
     night_from: int = 18
@@ -151,7 +153,7 @@ class Settings:
     allowed_users: frozenset[str] = frozenset()
     allow_any_user: bool = False   # явное разрешение команд всем в беседе
     extra_peers: tuple[str, ...] = ()
-    allowed_chats: frozenset[str] = frozenset()      # пусто - команды принимаются из любой беседы
+    allowed_chats: frozenset[str] = frozenset()      # пусто - только свои беседы (основная, EXTRA_PEERS, peers целей)
     strict_host_key: str = 'accept-new'
     kex: str = 'diffie-hellman-group14-sha1,diffie-hellman-group1-sha1'
     hostkey_algs: str = 'ssh-rsa'
@@ -411,6 +413,11 @@ def _mail_fields(where: str, merged: Mapping[str, object], text, problems: list[
         problems.append(f'{where} imap_ssl: нужно true или false, получено {ssl!r}')
         ssl = True
     out['imap_ssl'] = ssl
+    verify = merged.get('imap_verify')
+    if not isinstance(verify, bool):
+        problems.append(f'{where} imap_verify: нужно true или false, получено {verify!r}')
+        verify = True
+    out['imap_verify'] = verify
 
     folders = _as_str_list(merged.get('folders', []), f'{where} folders', problems)
     if not folders:
@@ -514,6 +521,13 @@ def load_targets(path: str | Path) -> tuple[dict[str, Target], list[str]]:
     return parse_targets(data)
 
 
+def _secure_url(url: str) -> bool:
+    """https, либо http только на этот же компьютер (для проверок с поддельным сервером)."""
+    if url.startswith('https://'):
+        return True
+    return bool(re.match(r'^http://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(/|$)', url))
+
+
 def path_problem(path: str) -> str:
     """Почему путь нельзя использовать (пустая строка - можно)."""
     if not path.startswith('/'):
@@ -552,6 +566,8 @@ def validate_environment(settings: Settings, targets: Mapping[str, Target], env:
         if settings.messenger not in NAMES:
             problems.append(f'MESSENGER: допустимо {", ".join(NAMES)}, получено {settings.messenger!r}')
         elif settings.messenger == 'telegram':
+            if not _secure_url(settings.telegram_api_url):
+                problems.append('TELEGRAM_API_URL: нужен https:// (токен бота нельзя отправлять открытым текстом)')
             if not settings.telegram_token:
                 problems.append('TELEGRAM_TOKEN не задан')
             if not settings.telegram_chat_id:
@@ -575,8 +591,8 @@ def validate_environment(settings: Settings, targets: Mapping[str, Target], env:
 _FIELD_ORDER = (
     'type', 'title', 'via', 'pam_user', 'user', 'password_env', 'target_host', 'target_sel', 'ssh_port',
     'pam_host', 'pam_port', 'paths', 'style', 'sudo', 'stale_days', 'imap_host', 'imap_port', 'imap_user',
-    'imap_ssl', 'mail_from', 'folders', 'night_from', 'night_to', 'subject_re', 'ok_words', 'fail_words',
-    'schedule', 'command', 'info', 'peers', 'prompt_timeout', 'connect_retries', 'connect_retry_delay',
+    'imap_ssl', 'imap_verify', 'mail_from', 'folders', 'night_from', 'night_to', 'subject_re', 'ok_words',
+    'fail_words', 'schedule', 'command', 'info', 'peers', 'prompt_timeout', 'connect_retries', 'connect_retry_delay',
     'run_timeout',
 )
 
@@ -607,7 +623,8 @@ def target_to_dict(target: Target, defaults: Mapping[str, object] | None = None)
         'ssh_port': target.ssh_port, 'pam_host': target.pam_host, 'pam_port': target.pam_port,
         'paths': list(target.paths), 'style': target.style, 'sudo': target.sudo,
         'stale_days': target.stale_days, 'imap_host': target.imap_host, 'imap_port': target.imap_port,
-        'imap_user': target.imap_user, 'imap_ssl': target.imap_ssl, 'mail_from': target.mail_from,
+        'imap_user': target.imap_user, 'imap_ssl': target.imap_ssl, 'imap_verify': target.imap_verify,
+        'mail_from': target.mail_from,
         'folders': list(target.folders), 'night_from': target.night_from, 'night_to': target.night_to,
         'subject_re': target.subject_re, 'ok_words': list(target.ok_words), 'fail_words': list(target.fail_words),
         'schedule': [str(s) for s in target.schedule], 'command': target.command, 'info': list(target.info),

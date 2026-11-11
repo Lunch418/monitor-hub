@@ -84,6 +84,7 @@ def ssh_argv(cfg: PamConfig) -> list[str]:
         *algorithms,
         '-o', 'PubkeyAuthentication=no',
         '-o', 'NumberOfPasswordPrompts=1',
+        '--',
         f'{cfg.user}@{cfg.host}',
     ]
 

@@ -17,6 +17,7 @@ import email
 import imaplib
 import os
 import re
+import ssl
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -124,6 +125,21 @@ def decode_mime(value: str | None) -> str:
     return ''.join(parts)
 
 
+IMAP_TIMEOUT = 30              # секунд на любую операцию с сервером: молчащий сервер не должен держать цель вечно
+BODY_LIMIT = 200_000           # символов тела письма, которые разбираются
+
+
+def connect_imap(query: MailQuery) -> imaplib.IMAP4:
+    """Соединение с проверкой сертификата и имени хоста (если не отключено verify = false) и таймаутом."""
+    if not query.ssl:
+        return imaplib.IMAP4(query.host, query.port, timeout=IMAP_TIMEOUT)
+    context = ssl.create_default_context()
+    if not query.verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return imaplib.IMAP4_SSL(query.host, query.port, ssl_context=context, timeout=IMAP_TIMEOUT)
+
+
 def body_text(msg: email.message.Message) -> str:
     plain = html = ''
     for part in msg.walk() if msg.is_multipart() else [msg]:
@@ -139,7 +155,8 @@ def body_text(msg: email.message.Message) -> str:
             plain = text
         else:
             html = text
-    text = re.sub(r'<[^>]+>', ' ', plain or html).replace('&nbsp;', ' ')
+    # [^<>]: тег не может содержать '<', поэтому разбор линейный (на '<<<<...' шаблон '<[^>]+>' квадратичный)
+    text = re.sub(r'<[^<>]+>', ' ', (plain or html)[:BODY_LIMIT]).replace('&nbsp;', ' ')
     return re.sub(r'\s+', ' ', text).strip()
 
 
@@ -234,6 +251,7 @@ class MailQuery:
     user: str
     password: str
     ssl: bool = True
+    verify: bool = True            # проверять сертификат сервера (false - только для своего самоподписанного)
     folders: tuple[str, ...] = ('INBOX',)
     mail_from: str = ''
     ok_words: tuple[str, ...] = DEFAULT_OK_WORDS
@@ -269,9 +287,8 @@ def fetch_results(query: MailQuery, expected: Iterable[str], win_start: datetime
     """Письма за окно -> {машина: {status, finish, dur, dt}} (только ожидаемые машины)."""
     wanted = set(expected)
     custom = re.compile(query.subject_re) if query.subject_re else None
-    make = connect or (imaplib.IMAP4_SSL if query.ssl else imaplib.IMAP4)
     results: dict[str, dict] = {}
-    conn = make(query.host, query.port)
+    conn = connect(query.host, query.port) if connect else connect_imap(query)
     try:
         conn.login(query.user, query.password)
         since = (win_start - timedelta(days=1)).strftime('%d-%b-%Y')

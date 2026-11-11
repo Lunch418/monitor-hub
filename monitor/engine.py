@@ -1,6 +1,6 @@
 """
 engine.py - проверка одной цели: вход через PAM, `ls -la` по всем путям в одном
-сеансе, разбор, картинки в стиле Midnight Commander, отправка в ВК.
+сеансе, разбор, картинки в стиле Midnight Commander, отправка в мессенджер.
 
 Различия между целями (формат размеров, цвета, сортировка, подпись, sudo,
 число путей) задаются полями Target, а не отдельными скриптами.
@@ -144,7 +144,7 @@ def ls_command(idx: int, path: str, sudo: bool = False) -> tuple[str, str, str]:
 
 
 LIVE_MAX_LINES = 200
-_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07')
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
 
 
 def live_command(text: str) -> str:
@@ -576,7 +576,8 @@ class Engine:
     def mail_query(self, target: Target) -> mailcheck.MailQuery:
         return mailcheck.MailQuery(
             host=target.imap_host, port=target.imap_port, user=target.imap_user,
-            password=self.password(target), ssl=target.imap_ssl, folders=target.folders,
+            password=self.password(target), ssl=target.imap_ssl, verify=target.imap_verify,
+            folders=target.folders,
             mail_from=target.mail_from, subject_re=target.subject_re,
             ok_words=target.ok_words or mailcheck.DEFAULT_OK_WORDS,
             fail_words=target.fail_words or mailcheck.DEFAULT_FAIL_WORDS)

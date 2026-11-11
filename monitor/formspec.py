@@ -52,6 +52,8 @@ FIELDS: tuple[Field, ...] = (
     Field('imap_host', 'imap', 'mail.example.org', MAIL),
     Field('imap_port', 'imap порт', '993', MAIL, number=True),
     Field('imap_ssl', 'imap ssl', kinds=MAIL, widget='select', choices=(('да', 'yes'), ('нет', 'no'))),
+    Field('imap_verify', 'проверять серт.', 'нет - только для своего самоподписанного сертификата', kinds=MAIL,
+          widget='select', choices=(('да', 'yes'), ('нет', 'no'))),
     Field('imap_user', 'почта', 'логин ящика', MAIL),
     Field('mail_from', 'от кого', 'часть адреса отправителя; пусто - любые', MAIL),
     Field('folders', 'папки почты', 'INBOX, Бэкапы', MAIL),
@@ -117,6 +119,7 @@ def values_from_target(target: Target) -> dict[str, str]:
         'sudo': 'yes' if target.sudo else 'no', 'stale_days': str(target.stale_days),
         'imap_host': target.imap_host, 'imap_port': str(target.imap_port),
         'imap_ssl': 'yes' if target.imap_ssl else 'no', 'imap_user': target.imap_user,
+        'imap_verify': 'yes' if target.imap_verify else 'no',
         'mail_from': target.mail_from, 'folders': ', '.join(target.folders),
         'night_from': str(target.night_from), 'night_to': str(target.night_to),
         'expect': format_expect(target.expect), 'subject_re': target.subject_re,
@@ -132,7 +135,7 @@ def values_from_target(target: Target) -> dict[str, str]:
 
 def blank_values(kind: str = 'ls') -> dict[str, str]:
     values = {f.id: '' for f in FIELDS}
-    values.update(type=kind, via='pam', style='backups', sudo='no', imap_ssl='yes', target_sel='1')
+    values.update(type=kind, via='pam', style='backups', sudo='no', imap_ssl='yes', imap_verify='yes', target_sel='1')
     return values
 
 
@@ -159,7 +162,7 @@ def raw_from_values(values: Mapping[str, str], *, kind: str, via: str, password_
         elif field.id in LIST_FIELDS:
             if text or field.id == 'paths':          # пустой список остальных полей - значение по умолчанию
                 raw[field.id] = split_list(text)
-        elif field.id == 'sudo' or field.id == 'imap_ssl':
+        elif field.id in ('sudo', 'imap_ssl', 'imap_verify'):
             raw[field.id] = text in YES
         elif field.number:
             if text:
@@ -183,7 +186,7 @@ def apply_set(values: dict[str, str], field_id: str, text: str, *, kind: str, vi
     if field.widget == 'select':
         options = {value for _, value in field.choices}
         low = text.strip().lower()
-        if field.id in ('sudo', 'imap_ssl'):
+        if field.id in ('sudo', 'imap_ssl', 'imap_verify'):
             low = 'yes' if low in YES else 'no' if low in NO else low
         if low not in options:
             return f'{field_id}: допустимо {", ".join(sorted(options))}'

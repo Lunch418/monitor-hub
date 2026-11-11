@@ -99,10 +99,10 @@ class Router:
         known = word in self.by_command or word in ('/targets', '/run', '/help') or is_info
         if not known:
             return None
-        if not self.authorized(from_id):
-            return Action('deny', text='Доступ запрещён')
         if peer_id is not None and str(peer_id) not in self.chats():
             return Action('deny')       # молча: чужая беседа не должна узнать, что бот слушает команды
+        if not self.authorized(from_id):
+            return Action('deny', text='Доступ запрещён')
 
         if word == '/help':
             return Action('reply', text=self.help_text())

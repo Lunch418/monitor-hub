@@ -21,6 +21,7 @@ from monitor.scheduler import build_scheduler, next_runs
 
 TICK_SECONDS = 5
 INFO_CACHE_SECONDS = 15        # повторный /uptime в эти секунды берётся из памяти: шлюз старый, входы дороги
+DENY_REPLY_SECONDS = 60          # отказ в чат не чаще раза в минуту: флуд командами не должен упираться в лимиты API
 INFO_WAIT_SECONDS = 180        # дольше не ждём ни одну машину: остальные ответы не должны ждать зависшую
 
 
@@ -36,6 +37,7 @@ class Hub:
         self.info_locks = {name: threading.Lock() for name in self.targets}
         self.info_cache: dict[tuple[str, str], tuple[float, str]] = {}
         self._clock = time.monotonic
+        self._last_deny: dict[int, float] = {}
         self.scheduler = build_scheduler(self.targets, self.fire_scheduled)
         self._spawn = spawn or _start_thread
 
@@ -119,7 +121,7 @@ class Hub:
             return
         if action.kind == 'deny':
             self.log.warning('Отказ: команда %r от %s (peer %s)', text.strip()[:40], from_id, peer_id)
-            if action.text:
+            if action.text and self._deny_reply_allowed(peer_id):
                 self.engine.chat.send_message(peer_id, action.text)
         elif action.kind == 'reply':
             self.engine.chat.send_message(peer_id, action.text)
@@ -132,6 +134,14 @@ class Hub:
             self.log.info('[%s] команда от %s (peer %s)', action.target.name, from_id, peer_id)
             if self.run_target(action.target, peer_id, action.arg) is not None:
                 self.engine.chat.send_message(peer_id, f'Проверяю: {action.target.title}...')
+
+    def _deny_reply_allowed(self, peer_id: int) -> bool:
+        now = self._clock()
+        last = self._last_deny.get(peer_id)
+        if last is not None and now - last < DENY_REPLY_SECONDS:
+            return False
+        self._last_deny[peer_id] = now
+        return True
 
     def poll(self) -> None:
         """Приём команд из беседы (в отдельном потоке)."""
